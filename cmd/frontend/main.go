@@ -160,7 +160,7 @@ func main() {
 		middleware.Timeout(54*time.Second),
 		middleware.Experiment(experimenter),
 	)
-	addr := cfg.HostAddr("localhost:8080")
+	addr := cfg.HostAddr(":8080")
 	log.Infof(ctx, "Listening on addr %s", addr)
 	log.Fatal(ctx, http.ListenAndServe(addr, mw(router)))
 }
