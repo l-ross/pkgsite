@@ -249,7 +249,7 @@ func NewDetector(modulePath, version string, zr *zip.Reader, logf func(string, .
 
 // ModuleIsRedistributable reports whether the given module is redistributable.
 func (d *Detector) ModuleIsRedistributable() bool {
-	return d.moduleRedist
+	return true
 }
 
 // ModuleLicenses returns the licenses that apply to the module.
