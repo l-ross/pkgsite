@@ -19,6 +19,7 @@ import (
 	"cloud.google.com/go/errorreporting"
 	"cloud.google.com/go/profiler"
 	"github.com/go-redis/redis/v7"
+	"github.com/google/safehtml/template"
 	"golang.org/x/pkgsite/internal/config"
 	"golang.org/x/pkgsite/internal/database"
 	"golang.org/x/pkgsite/internal/dcensus"
@@ -36,10 +37,11 @@ import (
 )
 
 var (
-	timeout    = config.GetEnv("GO_DISCOVERY_WORKER_TIMEOUT_MINUTES", "10")
-	queueName  = config.GetEnv("GO_DISCOVERY_WORKER_TASK_QUEUE", "")
-	workers    = flag.Int("workers", 10, "number of concurrent requests to the fetch service, when running locally")
-	staticPath = flag.String("static", "content/static", "path to folder containing static files served")
+	timeout   = config.GetEnv("GO_DISCOVERY_WORKER_TIMEOUT_MINUTES", "10")
+	queueName = config.GetEnv("GO_DISCOVERY_WORKER_TASK_QUEUE", "")
+	workers   = flag.Int("workers", 10, "number of concurrent requests to the fetch service, when running locally")
+	// flag used in call to safehtml/template.TrustedSourceFromFlag
+	_ = flag.String("static", "content/static", "path to folder containing static files served")
 )
 
 func main() {
@@ -105,7 +107,7 @@ func main() {
 		Queue:                fetchQueue,
 		ReportingClient:      reportingClient,
 		TaskIDChangeInterval: config.TaskIDChangeIntervalWorker,
-		StaticPath:           *staticPath,
+		StaticPath:           template.TrustedSourceFromFlag(flag.Lookup("static").Value),
 	})
 	if err != nil {
 		log.Fatal(ctx, err)

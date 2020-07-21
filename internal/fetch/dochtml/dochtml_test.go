@@ -5,10 +5,10 @@
 package dochtml
 
 import (
+	"context"
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"html/template"
 	"io/ioutil"
 	"path/filepath"
 	"strings"
@@ -23,14 +23,14 @@ import (
 func TestRender(t *testing.T) {
 	fset, d := mustLoadPackage("everydecl")
 
-	rawDoc, err := Render(fset, d, RenderOptions{
+	rawDoc, err := Render(context.Background(), fset, d, RenderOptions{
 		FileLinkFunc:   func(string) string { return "file" },
 		SourceLinkFunc: func(ast.Node) string { return "src" },
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	htmlDoc, err := html.Parse(strings.NewReader(rawDoc))
+	htmlDoc, err := html.Parse(strings.NewReader(rawDoc.String()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,49 +44,166 @@ func TestRender(t *testing.T) {
 	})
 }
 
-func TestFileLinkHTML(t *testing.T) {
+func TestLinkHTML(t *testing.T) {
 	for _, test := range []struct {
 		name string
-		file string
+		in   string
 		link string
-		want template.HTML
+		want string
 	}{
 		{
-			name: "file name is escaped",
-			file: `"File & name" <'file@name.com>`,
+			name: "regular string and link are rendered",
+			in:   `escape.go`,
+			link: `https://golang.org/src/html/escape.go`,
+			want: `<a class="class" href="https://golang.org/src/html/escape.go">escape.go</a>`,
+		},
+		{
+			name: "name is escaped",
+			in:   `"File & name" <'file@name.com>`,
 			link: "",
 			want: `&#34;File &amp; name&#34; &lt;&#39;file@name.com&gt;`,
 		},
 		{
 			name: "link is escaped",
-			file: "file.go",
+			in:   "file.go",
 			link: `"abc@go's.com"`,
-			want: `<a class="Documentation-file" href="&#34;abc@go&#39;s.com&#34;">file.go</a>`,
+			want: `<a class="class" href="%22abc@go%27s.com%22">file.go</a>`,
 		},
 		{
 			name: "file name and link are escaped",
-			file: `"a's.com@/`,
+			in:   `"a's.com@/`,
 			link: `"x@go's.com"`,
-			want: `<a class="Documentation-file" href="&#34;x@go&#39;s.com&#34;">&#34;a&#39;s.com@/</a>`,
+			want: `<a class="class" href="%22x@go%27s.com%22">&#34;a&#39;s.com@/</a>`,
 		},
 		{
 			name: "HTML injection escaped",
-			file: `<a href="gfr.con"></a>`,
-			link: `a.com`,
-			want: `<a class="Documentation-file" href="a.com">&lt;a href=&#34;gfr.con&#34;&gt;&lt;/a&gt;</a>`,
-		},
-		{
-			name: "regular file name and link are rendered",
-			file: `escape.go`,
-			link: `https://golang.org/src/html/escape.go`,
-			want: `<a class="Documentation-file" href="https://golang.org/src/html/escape.go">escape.go</a>`,
+			in:   `<a href="gfr.con"></a>`,
+			link: `"><script>bad</script>`,
+			want: `<a class="class" href="%22%3e%3cscript%3ebad%3c/script%3e">&lt;a href=&#34;gfr.con&#34;&gt;&lt;/a&gt;</a>`,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			got := fileLinkHTML(test.file, test.link)
-			diff := cmp.Diff(test.want, got)
+			got := linkHTML(test.in, test.link, "class")
+			diff := cmp.Diff(test.want, got.String())
 			if diff != "" {
 				t.Errorf("mismatch (-want, +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestVersionedPkgPath(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		pkgPath string
+		modInfo *ModuleInfo
+		want    string
+	}{
+		{
+			name:    "builtin package is not versioned",
+			pkgPath: "builtin",
+			modInfo: &ModuleInfo{
+				ModulePath:      "std",
+				ResolvedVersion: "v1.14.4",
+				ModulePackages:  map[string]bool{"std/builtin": true, "std/net/http": true},
+			},
+			want: "builtin",
+		},
+		{
+			name:    "std packages are not versioned",
+			pkgPath: "net/http",
+			modInfo: &ModuleInfo{
+				ModulePath:      "std",
+				ResolvedVersion: "v1.14.4",
+				ModulePackages:  map[string]bool{"std/builtin": true, "std/net/http": true},
+			},
+			want: "net/http",
+		},
+		{
+			name:    "imports from other modules are not versioned",
+			pkgPath: "golang.org/x/pkgsite",
+			modInfo: &ModuleInfo{
+				ModulePath:      "cloud.google.com/go",
+				ResolvedVersion: "v0.60.0",
+				ModulePackages:  map[string]bool{"cloud.google.com/go/civil": true},
+			},
+			want: "golang.org/x/pkgsite",
+		},
+		{
+			name:    "imports from other modules with shared prefixes are not versioned",
+			pkgPath: "golang.org/x/pkgsite",
+			modInfo: &ModuleInfo{
+				ModulePath:      "golang.org/x/time",
+				ResolvedVersion: "v1.2.3",
+				ModulePackages:  map[string]bool{"golang.org/x/time/rate": true},
+			},
+			want: "golang.org/x/pkgsite",
+		},
+		{
+			name:    "imports from same module are versioned",
+			pkgPath: "golang.org/x/pkgsite/internal/log",
+			modInfo: &ModuleInfo{
+				ModulePath:      "golang.org/x/pkgsite",
+				ResolvedVersion: "v1.1.2",
+				ModulePackages:  map[string]bool{"golang.org/x/pkgsite/internal/log": true},
+			},
+			want: "golang.org/x/pkgsite@v1.1.2/internal/log",
+		},
+		{
+			name:    "imports from same module with pseudo version are versioned",
+			pkgPath: "golang.org/x/pkgsite/internal/log",
+			modInfo: &ModuleInfo{
+				ModulePath:      "golang.org/x/pkgsite",
+				ResolvedVersion: "v0.0.0-20200709011933-a59b4ce778c4",
+				ModulePackages:  map[string]bool{"golang.org/x/pkgsite/internal/log": true},
+			},
+			want: "golang.org/x/pkgsite@v0.0.0-20200709011933-a59b4ce778c4/internal/log",
+		},
+		{
+			name:    "imports from same v2 module are versioned",
+			pkgPath: "k8s.io/klog/v2/klogr",
+			modInfo: &ModuleInfo{
+				ModulePath:      "k8s.io/klog/v2",
+				ResolvedVersion: "v2.3.0",
+				ModulePackages:  map[string]bool{"k8s.io/klog/v2": true, "k8s.io/klog/v2/klogr": true},
+			},
+			want: "k8s.io/klog/v2@v2.3.0/klogr",
+		},
+		{
+			name:    "imports from older major module version are not versioned",
+			pkgPath: "rsc.io/quote",
+			modInfo: &ModuleInfo{
+				ModulePath:      "rsc.io/quote/v3",
+				ResolvedVersion: "v3.1.0",
+				ModulePackages:  map[string]bool{"rsc.io/quote/v3": true},
+			},
+			want: "rsc.io/quote",
+		},
+		{
+			name:    "imports from newer major module version are not versioned",
+			pkgPath: "rsc.io/quote/v3",
+			modInfo: &ModuleInfo{
+				ModulePath:      "rsc.io/quote",
+				ResolvedVersion: "v1.5.3",
+				ModulePackages:  map[string]bool{"rsc.io/quote": true},
+			},
+			want: "rsc.io/quote/v3",
+		},
+		{
+			name:    "imports from nested module are not versioned",
+			pkgPath: "A/B/C/D",
+			modInfo: &ModuleInfo{
+				ModulePath:      "A",
+				ResolvedVersion: "v1.0.0",
+				ModulePackages:  map[string]bool{"A/B": true, "A/B/C": true},
+			},
+			want: "A/B/C/D",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := versionedPkgPath(test.pkgPath, test.modInfo)
+			if got != test.want {
+				t.Errorf("versionedPkgPath(%q) = %q, want %q", test.pkgPath, got, test.want)
 			}
 		})
 	}

@@ -24,6 +24,7 @@ import (
 	"golang.org/x/pkgsite/internal"
 	"golang.org/x/pkgsite/internal/derrors"
 	"golang.org/x/pkgsite/internal/experiment"
+	"golang.org/x/pkgsite/internal/source"
 	"golang.org/x/pkgsite/internal/stdlib"
 )
 
@@ -56,7 +57,7 @@ func constructOverviewDetails(ctx context.Context, mi *internal.ModuleInfo, read
 	}
 	if overview.Redistributable && readme != nil {
 		overview.ReadMeSource = fileSource(mi.ModulePath, mi.Version, readme.Filepath)
-		r, err := readmeHTML(ctx, mi, readme)
+		r, err := ReadmeHTML(ctx, mi, readme)
 		if err != nil {
 			return nil, err
 		}
@@ -65,8 +66,9 @@ func constructOverviewDetails(ctx context.Context, mi *internal.ModuleInfo, read
 	return overview, nil
 }
 
-// fetchPackageOverviewDetails uses data for the given package to return an OverviewDetails.
-func fetchPackageOverviewDetails(ctx context.Context, pkg *internal.LegacyVersionedPackage, versionedLinks bool) (*OverviewDetails, error) {
+// legacyFetchPackageOverviewDetails uses data for the given package to return
+// an OverviewDetails.
+func legacyFetchPackageOverviewDetails(ctx context.Context, pkg *internal.LegacyVersionedPackage, versionedLinks bool) (*OverviewDetails, error) {
 	od, err := constructOverviewDetails(ctx, &pkg.ModuleInfo, &internal.Readme{Filepath: pkg.LegacyReadmeFilePath, Contents: pkg.LegacyReadmeContents},
 		pkg.LegacyPackage.IsRedistributable, versionedLinks)
 	if err != nil {
@@ -80,7 +82,7 @@ func fetchPackageOverviewDetails(ctx context.Context, pkg *internal.LegacyVersio
 }
 
 // fetchPackageOverviewDetailsNew uses data for the given versioned directory to return an OverviewDetails.
-func fetchPackageOverviewDetailsNew(ctx context.Context, vdir *internal.VersionedDirectory, versionedLinks bool) (*OverviewDetails, error) {
+func fetchPackageOverviewDetails(ctx context.Context, vdir *internal.VersionedDirectory, versionedLinks bool) (*OverviewDetails, error) {
 	var lv string
 	if versionedLinks {
 		lv = linkVersion(vdir.Version, vdir.ModulePath)
@@ -91,12 +93,12 @@ func fetchPackageOverviewDetailsNew(ctx context.Context, vdir *internal.Versione
 		ModulePath:       vdir.ModulePath,
 		ModuleURL:        constructModuleURL(vdir.ModulePath, lv),
 		RepositoryURL:    vdir.SourceInfo.RepoURL(),
-		Redistributable:  vdir.DirectoryNew.IsRedistributable,
+		Redistributable:  vdir.Directory.IsRedistributable,
 		PackageSourceURL: vdir.SourceInfo.DirectoryURL(packageSubdir(vdir.Path, vdir.ModulePath)),
 	}
 	if overview.Redistributable && vdir.Readme != nil {
 		overview.ReadMeSource = fileSource(vdir.ModulePath, vdir.Version, vdir.Readme.Filepath)
-		r, err := readmeHTML(ctx, &vdir.ModuleInfo, vdir.Readme)
+		r, err := ReadmeHTML(ctx, &vdir.ModuleInfo, vdir.Readme)
 		if err != nil {
 			return nil, err
 		}
@@ -117,10 +119,12 @@ func packageSubdir(pkgPath, modulePath string) string {
 	}
 }
 
-// readmeHTML sanitizes readmeContents based on bluemondy.UGCPolicy and returns
+// ReadmeHTML sanitizes readmeContents based on bluemondy.UGCPolicy and returns
 // a safehtml.HTML. If readmeFilePath indicates that this is a markdown file,
 // it will also render the markdown contents using blackfriday.
-func readmeHTML(ctx context.Context, mi *internal.ModuleInfo, readme *internal.Readme) (_ safehtml.HTML, err error) {
+//
+// It is exported to support external testing.
+func ReadmeHTML(ctx context.Context, mi *internal.ModuleInfo, readme *internal.Readme) (_ safehtml.HTML, err error) {
 	defer derrors.Wrap(&err, "readmeHTML(%s@%s)", mi.ModulePath, mi.Version)
 	if readme == nil {
 		return safehtml.HTML{}, nil
@@ -141,18 +145,19 @@ func readmeHTML(ctx context.Context, mi *internal.ModuleInfo, readme *internal.R
 	// Render HTML similar to blackfriday.Run(), but here we implement a custom
 	// Walk function in order to modify image paths in the rendered HTML.
 	b := &bytes.Buffer{}
-	rootNode := parser.Parse([]byte(readme.Contents))
+	contents := bytes.ReplaceAll([]byte(readme.Contents), []byte("\r"), nil)
+	rootNode := parser.Parse(contents)
 	var walkErr error
 	rootNode.Walk(func(node *blackfriday.Node, entering bool) blackfriday.WalkStatus {
 		switch node.Type {
 		case blackfriday.Image, blackfriday.Link:
 			useRaw := node.Type == blackfriday.Image
-			if d := translateRelativeLink(string(node.LinkData.Destination), mi, useRaw, readme); d != "" {
+			if d := translateRelativeLink(string(node.LinkData.Destination), mi.SourceInfo, useRaw, readme); d != "" {
 				node.LinkData.Destination = []byte(d)
 			}
 		case blackfriday.HTMLBlock, blackfriday.HTMLSpan:
 			if experiment.IsActive(ctx, internal.ExperimentTranslateHTML) {
-				d, err := translateHTML(node.Literal, mi, readme)
+				d, err := translateHTML(node.Literal, mi.SourceInfo, readme)
 				if err != nil {
 					walkErr = fmt.Errorf("couldn't transform html block(%s): %w", node.Literal, err)
 					return blackfriday.Terminate
@@ -200,7 +205,7 @@ func isMarkdown(filename string) bool {
 // repository. As the discovery site doesn't host the full repository content,
 // in order for the image to render, we need to convert the relative path to an
 // absolute URL to a hosted image.
-func translateRelativeLink(dest string, mi *internal.ModuleInfo, useRaw bool, readme *internal.Readme) string {
+func translateRelativeLink(dest string, info *source.Info, useRaw bool, readme *internal.Readme) string {
 	destURL, err := url.Parse(dest)
 	if err != nil || destURL.IsAbs() {
 		return ""
@@ -210,57 +215,73 @@ func translateRelativeLink(dest string, mi *internal.ModuleInfo, useRaw bool, re
 		return ""
 	}
 	// Paths are relative to the README location.
-	destPath := path.Join(path.Dir(readme.Filepath), path.Clean(destURL.Path))
+	destPath := path.Join(path.Dir(readme.Filepath), path.Clean(trimmedEscapedPath(destURL)))
 	if useRaw {
-		return mi.SourceInfo.RawURL(destPath)
+		return info.RawURL(destPath)
 	}
-	return mi.SourceInfo.FileURL(destPath)
+	return info.FileURL(destPath)
+}
+
+// trimmedEscapedPath trims surrounding whitespace from u's path, then returns it escaped.
+func trimmedEscapedPath(u *url.URL) string {
+	u.Path = strings.TrimSpace(u.Path)
+	return u.EscapedPath()
 }
 
 // translateHTML parses html text into parsed html nodes. It then
 // iterates through the nodes and replaces the src key with a value
 // that properly represents the source of the image from the repo.
-func translateHTML(htmlText []byte, mi *internal.ModuleInfo, readme *internal.Readme) ([]byte, error) {
+func translateHTML(htmlText []byte, info *source.Info, readme *internal.Readme) (_ []byte, err error) {
+	defer derrors.Wrap(&err, "translateHTML(readme.Filepath=%s)", readme.Filepath)
+
 	r := bytes.NewReader(htmlText)
 	nodes, err := html.ParseFragment(r, nil)
 	if err != nil {
 		return nil, err
 	}
 	var buf bytes.Buffer
+	changed := false
 	for _, n := range nodes {
-		// Every parsed node begins with <html><head></head><body>. Ignore that.
+		// We expect every parsed node to begin with <html><head></head><body>.
 		if n.DataAtom != atom.Html {
-			return htmlText, nil
+			return nil, fmt.Errorf("top-level node is %q, expected 'html'", n.DataAtom)
 		}
 		// When the parsed html nodes don't have a valid structure
 		// (i.e: an html comment), then just return the original text.
 		if n.FirstChild == nil || n.FirstChild.NextSibling == nil || n.FirstChild.NextSibling.DataAtom != atom.Body {
 			return htmlText, nil
 		}
-		n = n.FirstChild.NextSibling.FirstChild
-		// If <html><head><body> </body>... has no children (empty content),
-		// then just return the original text.
-		if n == nil {
-			return htmlText, nil
-		}
-		walkHTML(n, mi, readme)
-		if err := html.Render(&buf, n); err != nil {
-			return nil, err
+		n = n.FirstChild.NextSibling
+		// n is now the body node. Walk all its children.
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			if walkHTML(c, info, readme) {
+				changed = true
+			}
+			if err := html.Render(&buf, c); err != nil {
+				return nil, err
+			}
 		}
 	}
-	return buf.Bytes(), nil
+	if changed {
+		return buf.Bytes(), nil
+	}
+	// If there were no changes, return the original.
+	return htmlText, nil
 }
 
 // walkHTML crawls through an html node and replaces the src
 // tag link with a link that properly represents the image
 // from the repo source.
-func walkHTML(n *html.Node, mi *internal.ModuleInfo, readme *internal.Readme) {
+// It reports whether it made a change.
+func walkHTML(n *html.Node, info *source.Info, readme *internal.Readme) bool {
+	changed := false
 	if n.Type == html.ElementNode && n.DataAtom == atom.Img {
 		var attrs []html.Attribute
 		for _, a := range n.Attr {
 			if a.Key == "src" {
-				if v := translateRelativeLink(a.Val, mi, true, readme); v != "" {
+				if v := translateRelativeLink(a.Val, info, true, readme); v != "" {
 					a.Val = v
+					changed = true
 				}
 			}
 			attrs = append(attrs, a)
@@ -268,6 +289,9 @@ func walkHTML(n *html.Node, mi *internal.ModuleInfo, readme *internal.Readme) {
 		n.Attr = attrs
 	}
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		walkHTML(c, mi, readme)
+		if walkHTML(c, info, readme) {
+			changed = true
+		}
 	}
+	return changed
 }

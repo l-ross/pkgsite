@@ -1,4 +1,4 @@
-// Copyright 2019 The Go Authors. All rights reserved.
+// Copyright 2019-2020 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -11,19 +11,21 @@ import (
 )
 
 var scriptHashes = []string{
-	// From content/static/html/pages/base.tmpl
+	// From content/static/html/base.tmpl
 	"'sha256-d6W7MwuGWbguTHRzQhf5QN1jXmNo9Ao218saZkWLWZI='",
-	"'sha256-CCu0fuIQFBHSCEpfR6ZRzzcczJIS/VGMGrez8LR49WY='",
 	"'sha256-qPGTOKPn+niRiNKQIEX0Ktwuj+D+iPQWIxnlhPicw58='",
+	"'sha256-CgM7SjnSbDyuIteS+D1CQuSnzyKwL0qtXLU6ZW2hB+g='",
+	// From content/static/html/pages/badge.tmpl
+	"'sha256-T7xOt6cgLji3rhOWyKK7t5XKv8+LASQwOnHiHHy8Kwk='",
 	// From content/static/html/pages/details.tmpl
 	"'sha256-s16e7aT7Gsajq5UH1DbaEFEnNx2VjvS5Xixcxwm4+F8='",
+	// From content/static/html/pages/fetch.tmpl
+	"'sha256-1J6DWwTWs/QDZ2+ORDuUQCibmFnXXaNXYOtc0Jk6VU4='",
 	// From content/static/html/pages/pkg_doc.tmpl
 	"'sha256-gBtJYPzfgw/0FIACORDIAD08i5rxTQ5J0rhIU656A2U='",
 	"'sha256-91GG/273d2LdEV//lJMbTodGN501OuKZKYYphui+wDQ='",
 	// From content/static/html/worker/index.tmpl
 	"'sha256-5EpitFYSzGNQNUsqi5gAaLqnI3ZWfcRo/6gLTO0oCoE='",
-	// From content/static/html/pages/fetch.tmpl
-	"'sha256-1J6DWwTWs/QDZ2+ORDuUQCibmFnXXaNXYOtc0Jk6VU4='",
 }
 
 // SecureHeaders adds a content-security-policy and other security-related

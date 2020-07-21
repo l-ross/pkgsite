@@ -77,9 +77,13 @@ var (
 	// ReprocessAlternativeModule indicates that the module to be reprocessed
 	// previously had a status of derrors.AlternativeModule.
 	ReprocessAlternative = errors.New("reprocess alternative module")
+	// ReprocessDBModuleInsertInvalid represents a module to be reprocessed
+	// that was successfully fetched but could not be inserted due to invalid
+	// arguments to postgres.InsertModule.
+	ReprocessDBModuleInsertInvalid = errors.New("reprocess db module insert invalid")
 )
 
-var httpCodes = []struct {
+var codes = []struct {
 	err  error
 	code int
 }{
@@ -93,13 +97,14 @@ var httpCodes = []struct {
 	{BadModule, 490},
 	{AlternativeModule, 491},
 
-	// 52x errors represents modules that need to be reprocessed, and the
+	// 52x and 54x errors represents modules that need to be reprocessed, and the
 	// previous status code the module had. Note that the status code
 	// matters for determining reprocessing order.
 	{ReprocessStatusOK, 520},
 	{ReprocessHasIncompletePackages, 521},
 	{ReprocessBadModule, 540},
 	{ReprocessAlternative, 541},
+	{ReprocessDBModuleInsertInvalid, 542},
 
 	// 60x errors represents errors that occurred when processing a
 	// package.
@@ -111,18 +116,18 @@ var httpCodes = []struct {
 	{PackageBadImportPath, 605},
 }
 
-// FromHTTPStatus generates an error according to the HTTP semantics for the given
-// status code. It uses the given format string and arguments to create the
-// error string according to the fmt package. If format is the empty string,
-// then the error corresponding to the code is returned unwrapped.
+// FromStatus generates an error according for the given status code. It uses
+// the given format string and arguments to create the error string according
+// to the fmt package. If format is the empty string, then the error
+// corresponding to the code is returned unwrapped.
 //
 // If code is http.StatusOK, it returns nil.
-func FromHTTPStatus(code int, format string, args ...interface{}) error {
+func FromStatus(code int, format string, args ...interface{}) error {
 	if code == http.StatusOK {
 		return nil
 	}
 	var innerErr = Unknown
-	for _, e := range httpCodes {
+	for _, e := range codes {
 		if e.code == code {
 			innerErr = e.err
 			break
@@ -134,12 +139,12 @@ func FromHTTPStatus(code int, format string, args ...interface{}) error {
 	return fmt.Errorf(format+": %w", append(args, innerErr)...)
 }
 
-// ToHTTPStatus returns an HTTP status code corresponding to err.
-func ToHTTPStatus(err error) int {
+// ToStatus returns a status code corresponding to err.
+func ToStatus(err error) int {
 	if err == nil {
 		return http.StatusOK
 	}
-	for _, e := range httpCodes {
+	for _, e := range codes {
 		if errors.Is(err, e.err) {
 			return e.code
 		}
@@ -152,13 +157,15 @@ func ToHTTPStatus(err error) int {
 func ToReprocessStatus(status int) int {
 	switch status {
 	case http.StatusOK:
-		return ToHTTPStatus(ReprocessStatusOK)
-	case ToHTTPStatus(HasIncompletePackages):
-		return ToHTTPStatus(ReprocessHasIncompletePackages)
-	case ToHTTPStatus(BadModule):
-		return ToHTTPStatus(ReprocessBadModule)
-	case ToHTTPStatus(AlternativeModule):
-		return ToHTTPStatus(ReprocessAlternative)
+		return ToStatus(ReprocessStatusOK)
+	case ToStatus(HasIncompletePackages):
+		return ToStatus(ReprocessHasIncompletePackages)
+	case ToStatus(BadModule):
+		return ToStatus(ReprocessBadModule)
+	case ToStatus(AlternativeModule):
+		return ToStatus(ReprocessAlternative)
+	case ToStatus(DBModuleInsertInvalid):
+		return ToStatus(ReprocessDBModuleInsertInvalid)
 	default:
 		return status
 	}

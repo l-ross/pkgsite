@@ -40,6 +40,7 @@ type Server struct {
 	devMode              bool
 	errorPage            []byte
 	appVersionLabel      string
+	googleTagManagerID   string
 
 	mu        sync.Mutex // Protects all fields below
 	templates map[string]*template.Template
@@ -55,6 +56,7 @@ type ServerConfig struct {
 	ThirdPartyPath       string
 	DevMode              bool
 	AppVersionLabel      string
+	GoogleTagManagerID   string
 }
 
 // NewServer creates a new Server for the given database and template directory.
@@ -76,6 +78,7 @@ func NewServer(scfg ServerConfig) (_ *Server, err error) {
 		templates:            ts,
 		taskIDChangeInterval: scfg.TaskIDChangeInterval,
 		appVersionLabel:      scfg.AppVersionLabel,
+		googleTagManagerID:   scfg.GoogleTagManagerID,
 	}
 	errorPageBytes, err := s.renderErrorPage(context.Background(), http.StatusInternalServerError, "error.tmpl", nil)
 	if err != nil {
@@ -102,11 +105,13 @@ func (s *Server) Install(handle func(string, http.Handler), redisClient *redis.C
 		http.ServeFile(w, r, fmt.Sprintf("%s/img/favicon.ico", http.Dir(s.staticPath.String())))
 	}))
 	handle("/fetch/", fetchHandler)
+	handle("/play/", http.HandlerFunc(s.handlePlay))
 	handle("/pkg/", http.HandlerFunc(s.handlePackageDetailsRedirect))
 	handle("/search", searchHandler)
 	handle("/search-help", s.staticPageHandler("search_help.tmpl", "Search Help - go.dev"))
 	handle("/license-policy", s.licensePolicyHandler())
 	handle("/about", http.RedirectHandler("https://go.dev/about", http.StatusFound))
+	handle("/badge/", http.HandlerFunc(s.badgeHandler))
 	handle("/", detailHandler)
 	handle("/autocomplete", http.HandlerFunc(s.handleAutoCompletion))
 	handle("/robots.txt", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -184,12 +189,13 @@ func (s *Server) staticPageHandler(templateName, title string) http.HandlerFunc 
 
 // basePage contains fields shared by all pages when rendering templates.
 type basePage struct {
-	HTMLTitle       string
-	Query           string
-	Experiments     *experiment.Set
-	GodocURL        string
-	DevMode         bool
-	AppVersionLabel string
+	HTMLTitle          string
+	Query              string
+	Experiments        *experiment.Set
+	GodocURL           string
+	DevMode            bool
+	AppVersionLabel    string
+	GoogleTagManagerID string
 }
 
 // licensePolicyPage is used to generate the static license policy page.
@@ -214,12 +220,13 @@ func (s *Server) licensePolicyHandler() http.HandlerFunc {
 // newBasePage returns a base page for the given request and title.
 func (s *Server) newBasePage(r *http.Request, title string) basePage {
 	return basePage{
-		HTMLTitle:       title,
-		Query:           searchQuery(r),
-		Experiments:     experiment.FromContext(r.Context()),
-		GodocURL:        middleware.GodocURLPlaceholder,
-		DevMode:         s.devMode,
-		AppVersionLabel: s.appVersionLabel,
+		HTMLTitle:          title,
+		Query:              searchQuery(r),
+		Experiments:        experiment.FromContext(r.Context()),
+		GodocURL:           middleware.GodocURLPlaceholder,
+		DevMode:            s.devMode,
+		AppVersionLabel:    s.appVersionLabel,
+		GoogleTagManagerID: s.googleTagManagerID,
 	}
 }
 
@@ -409,12 +416,13 @@ func parsePageTemplates(base template.TrustedSource) (map[string]*template.Templ
 	join := template.TrustedSourceJoin
 
 	htmlSets := [][]template.TrustedSource{
-		{tsc("index.tmpl")},
+		{tsc("badge.tmpl")},
 		{tsc("error.tmpl")},
 		{tsc("fetch.tmpl")},
+		{tsc("index.tmpl")},
+		{tsc("license_policy.tmpl")},
 		{tsc("search.tmpl")},
 		{tsc("search_help.tmpl")},
-		{tsc("license_policy.tmpl")},
 		{tsc("overview.tmpl"), tsc("details.tmpl")},
 		{tsc("subdirectories.tmpl"), tsc("details.tmpl")},
 		{tsc("pkg_doc.tmpl"), tsc("details.tmpl")},

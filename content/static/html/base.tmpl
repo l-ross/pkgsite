@@ -10,6 +10,7 @@
 <meta http-equiv="X-UA-Compatible" content="IE=edge">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="Description" content="Go is an open source programming language that makes it easy to build simple, reliable, and efficient software.">
+<meta class="js-gtmID" data-gtmid="{{.GoogleTagManagerID}}">
 <link href="https://fonts.googleapis.com/css?family=Work+Sans:600|Roboto:400,500,700|Source+Code+Pro" rel="stylesheet">
 <link href="/static/css/stylesheet.css?version={{.AppVersionLabel}}" rel="stylesheet">
 {{if (.Experiments.IsActive "sidenav")}}
@@ -166,7 +167,7 @@
           <li class="Footer-listItem"><a href="http://www.google.com/intl/en/policies/privacy/" target="_blank" rel="noopener">Privacy
               Policy</a></li>
           <li class="Footer-listItem">
-            <a href="https://golang.org/s/discovery-feedback" target="_blank" rel="noopener">
+            <a href="https://golang.org/s/pkgsite-feedback" target="_blank" rel="noopener">
               Report an Issue
             </a>
           </li>
@@ -194,17 +195,11 @@
 
 {{if not .DevMode}}
 <script async>
-  var gtmURL = "https://www.googletagmanager.com/gtm.js?id=GTM-W8MVQXG";
-  loadScript(gtmURL);
-
-  f = document.createElement("iframe")
-  f.src = gtmURL;
-  f.height = "0";
-  f.width = "0";
-  f.style = "display:none;visibility:hidden"
-  s = document.createElement("noscript");
-  s.appendChild(f);
-  document.head.appendChild(s);
+  const gtmId = document.querySelector('.js-gtmID').dataset.gtmid; // this will throw if the querySelector can’t find the element
+  if (!gtmId) {
+    throw new Error('Google Tag Manager ID not found');
+  }
+  loadScript(`https://www.googletagmanager.com/gtm.js?id=${gtmId}`);
 </script>
 {{end}}
 

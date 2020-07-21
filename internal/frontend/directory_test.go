@@ -34,23 +34,31 @@ func TestFetchDirectoryDetails(t *testing.T) {
 		var wantPkgs []*Package
 		for _, suffix := range suffixes {
 			sp := sample.LegacyPackage(modulePath, suffix)
-			pkg, err := legacyCreatePackage(sp, mi, false)
+			pm := internal.PackageMetaFromLegacyPackage(sp)
+			pkg, err := createPackage(pm, mi, false)
 			if err != nil {
 				t.Fatal(err)
 			}
+			pkg.PathAfterDirectory = strings.TrimPrefix(strings.TrimPrefix(pm.Path, dirPath), "/")
+			if pkg.PathAfterDirectory == "" {
+				pkg.PathAfterDirectory = effectiveName(pm.Path, pm.Name) + " (root)"
+			}
+			pkg.Synopsis = sp.Synopsis
 			pkg.PathAfterDirectory = strings.TrimPrefix(strings.TrimPrefix(sp.Path, dirPath), "/")
 			if pkg.PathAfterDirectory == "" {
-				pkg.PathAfterDirectory = fmt.Sprintf("%s (root)", effectiveName(sp))
+				pkg.PathAfterDirectory = fmt.Sprintf("%s (root)", effectiveName(sp.Path, sp.Name))
 			}
 			wantPkgs = append(wantPkgs, pkg)
 		}
 
 		mod := createModule(mi, sample.LicenseMetadata, false)
 		want := &Directory{
-			Module:   *mod,
-			Path:     dirPath,
+			DirectoryHeader: DirectoryHeader{
+				Module: *mod,
+				Path:   dirPath,
+				URL:    constructDirectoryURL(dirPath, mi.ModulePath, linkVersion(mi.Version, mi.ModulePath)),
+			},
 			Packages: wantPkgs,
-			URL:      constructDirectoryURL(dirPath, mi.ModulePath, linkVersion(mi.Version, mi.ModulePath)),
 		}
 		if diff := cmp.Diff(want, got, cmp.AllowUnexported(safehtml.Identifier{})); diff != "" {
 			t.Errorf("fetchDirectoryDetails(ctx, %q, %q, %q) mismatch (-want +got):\n%s", dirPath, modulePath, version, diff)
@@ -144,8 +152,22 @@ func TestFetchDirectoryDetails(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mi := sample.ModuleInfoReleaseType(tc.modulePath, tc.version)
-			got, err := fetchDirectoryDetails(ctx, testDB,
-				tc.dirPath, mi, sample.LicenseMetadata, tc.includeDirPath)
+			var (
+				got *Directory
+				err error
+			)
+			t.Run("use-directories", func(t *testing.T) {
+				d := sample.DirectoryEmpty(tc.dirPath)
+				vdir := &internal.VersionedDirectory{
+					ModuleInfo: *mi,
+					Directory:  *d,
+				}
+				got, err = fetchDirectoryDetails(ctx, testDB, vdir, tc.includeDirPath)
+			})
+			t.Run("legacy", func(t *testing.T) {
+				got, err = legacyFetchDirectoryDetails(ctx, testDB,
+					tc.dirPath, mi, sample.LicenseMetadata, tc.includeDirPath)
+			})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -194,7 +216,7 @@ func TestFetchDirectoryDetailsInvalidArguments(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mi := sample.ModuleInfoReleaseType(tc.modulePath, tc.version)
-			got, err := fetchDirectoryDetails(ctx, testDB,
+			got, err := legacyFetchDirectoryDetails(ctx, testDB,
 				tc.dirPath, mi, sample.LicenseMetadata, tc.includeDirPath)
 			if !errors.Is(err, derrors.InvalidArgument) {
 				t.Fatalf("expected err; got = \n%+v, %v", got, err)

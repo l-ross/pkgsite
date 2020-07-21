@@ -6,19 +6,25 @@ package render
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"go/ast"
+	"go/format"
 	"go/printer"
 	"go/scanner"
 	"go/token"
-	"html/template"
-	"io"
 	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
 
+	"github.com/google/safehtml"
+	"github.com/google/safehtml/legacyconversions"
+	safetemplate "github.com/google/safehtml/template"
+	"golang.org/x/pkgsite/internal"
+	"golang.org/x/pkgsite/internal/experiment"
 	"golang.org/x/pkgsite/internal/fetch/internal/doc"
+	"golang.org/x/pkgsite/internal/log"
 )
 
 /*
@@ -56,62 +62,122 @@ var (
 	badAnchorRx = regexp.MustCompile(`[^a-zA-Z0-9]`)
 )
 
-func (r *Renderer) declHTML(doc string, decl ast.Decl) (out struct{ Doc, Decl template.HTML }) {
+type docData struct {
+	Elements          []docElement
+	DisablePermalinks bool
+}
+
+type docElement struct {
+	IsHeading   bool
+	IsPreformat bool
+	// for paragraph and preformat
+	Body safehtml.HTML
+	// for heading
+	Title string
+	ID    safehtml.Identifier
+}
+
+// docTmpl renders documentation. It expects a docData.
+var docTmpl = safetemplate.Must(safetemplate.New("").Parse(`
+{{- range .Elements -}}
+  {{- if .IsHeading -}}
+    <h3 id="{{.ID}}">{{.Title}}
+    {{- if not $.DisablePermalinks}}<a href="#{{.ID}}">¶</a>{{end -}}
+    </h3>
+  {{else if .IsPreformat -}}
+    <pre>{{.Body}}</pre>
+  {{- else -}}
+    <p>{{.Body}}</p>
+  {{- end -}}
+{{end}}`))
+
+func (r *Renderer) declHTML(doc string, decl ast.Decl) (out struct{ Doc, Decl safehtml.HTML }) {
 	dids := newDeclIDs(decl)
 	idr := &identifierResolver{r.pids, dids, r.packageURL}
 	if doc != "" {
-		var b bytes.Buffer
+		var els []docElement
 		for _, blk := range docToBlocks(doc) {
+			var el docElement
 			switch blk := blk.(type) {
 			case *paragraph:
-				b.WriteString("<p>\n")
-				for _, line := range blk.lines {
-					r.formatLineHTML(&b, line, idr)
-					b.WriteString("\n")
-				}
-				b.WriteString("</p>\n")
+				el.Body = r.linesToHTML(blk.lines, idr)
 			case *preformat:
-				b.WriteString("<pre>\n")
-				for _, line := range blk.lines {
-					r.formatLineHTML(&b, line, nil)
-					b.WriteString("\n")
-				}
-				b.WriteString("</pre>\n")
+				el.IsPreformat = true
+				el.Body = r.linesToHTML(blk.lines, nil)
 			case *heading:
+				el.IsHeading = true
+				el.Title = blk.title
 				id := badAnchorRx.ReplaceAllString(blk.title, "_")
-				b.WriteString(`<h3 id="hdr-` + id + `">`)
-				b.WriteString(template.HTMLEscapeString(blk.title))
-				if !r.disablePermalinks {
-					b.WriteString(` <a href="#hdr-` + id + `">¶</a>`)
-				}
-				b.WriteString("</h3>\n")
+				el.ID = safehtml.IdentifierFromConstantPrefix("hdr", id)
 			}
+			els = append(els, el)
 		}
-		out.Doc = template.HTML(b.String())
+		out.Doc = ExecuteToHTML(docTmpl, docData{Elements: els, DisablePermalinks: r.disablePermalinks})
 	}
 	if decl != nil {
-		var b bytes.Buffer
-		b.WriteString("<pre>\n")
-		r.formatDeclHTML(&b, decl, idr)
-		b.WriteString("</pre>\n")
-		out.Decl = template.HTML(b.String())
+		out.Decl = safehtml.HTMLConcat(
+			safetemplate.MustParseAndExecuteToHTML("<pre>\n"),
+			r.formatDeclHTML(decl, idr),
+			safetemplate.MustParseAndExecuteToHTML("</pre>\n"))
 	}
 	return out
 }
 
-func (r *Renderer) codeHTML(code interface{}) template.HTML {
-	// TODO: Should we perform hotlinking for comments and code?
-	if code == nil {
-		return ""
+func (r *Renderer) linesToHTML(lines []string, idr *identifierResolver) safehtml.HTML {
+	newline := safehtml.HTMLEscaped("\n")
+	htmls := make([]safehtml.HTML, 0, 2*len(lines))
+	for _, l := range lines {
+		htmls = append(htmls, r.formatLineHTML(l, idr))
+		htmls = append(htmls, newline)
 	}
-
-	var b bytes.Buffer
-	p := printer.Config{Mode: printer.UseSpaces | printer.TabIndent, Tabwidth: 4}
-	p.Fprint(&b, r.fset, code)
-	return codeHTML(b.String())
+	return safehtml.HTMLConcat(htmls...)
 }
 
-func codeHTML(src string) template.HTML {
+func (r *Renderer) codeString(ex *doc.Example) (string, error) {
+	if ex == nil || ex.Code == nil {
+		return "", errors.New("Please include an example with code")
+	}
+	var buf bytes.Buffer
+
+	if experiment.IsActive(r.ctx, internal.ExperimentExecutableExamples) && ex.Play != nil {
+		if err := format.Node(&buf, r.fset, ex.Play); err != nil {
+			return "", err
+		}
+	} else {
+		p := printer.Config{Mode: printer.UseSpaces | printer.TabIndent, Tabwidth: 4}
+		p.Fprint(&buf, r.fset, ex.Code)
+	}
+
+	return buf.String(), nil
+}
+
+func (r *Renderer) codeHTML(ex *doc.Example) safehtml.HTML {
+	codeStr, err := r.codeString(ex)
+	if err != nil {
+		log.Errorf(r.ctx, "Error converting *doc.Example into string: %v", err)
+	}
+	return codeHTML(codeStr)
+}
+
+type codeElement struct {
+	Text    string
+	Comment bool
+}
+
+var codeTmpl = safetemplate.Must(safetemplate.New("").Parse(`
+<pre>
+{{range .}}
+  {{- if .Comment -}}
+    <span class="comment">{{.Text}}</span>
+  {{- else -}}
+    {{.Text}}
+  {{- end -}}
+{{end}}
+</pre>
+`))
+
+func codeHTML(src string) safehtml.HTML {
+	var els []codeElement
 	// If code is an *ast.BlockStmt, then trim the braces.
 	var indent string
 	if len(src) >= 4 && strings.HasPrefix(src, "{\n") && strings.HasSuffix(src, "\n}") {
@@ -124,14 +190,12 @@ func codeHTML(src string) template.HTML {
 
 	// Scan through the source code, adding comment spans for comments,
 	// and stripping the trailing example output.
-	var bb bytes.Buffer
-	var lastOffset int   // last src offset copied to output buffer
-	var outputOffset int // index in output buffer of output comment
+	var lastOffset int        // last src offset copied to output buffer
+	var outputOffset int = -1 // index in els of last output comment
 	var s scanner.Scanner
 	fset := token.NewFileSet()
 	file := fset.AddFile("", fset.Base(), len(src))
 	s.Init(file, []byte(src), nil, scanner.ScanComments)
-	bb.WriteString("<pre>\n")
 	indent = "\n" + indent // prepend newline for easier search-and-replace.
 scan:
 	for {
@@ -139,46 +203,49 @@ scan:
 		offset := file.Offset(p) // current offset into source file
 		prev := src[lastOffset:offset]
 		prev = strings.Replace(prev, indent, "\n", -1)
-		bb.WriteString(template.HTMLEscapeString(prev))
+		els = append(els, codeElement{prev, false})
 		lastOffset = offset
 		switch tok {
 		case token.EOF:
 			break scan
 		case token.COMMENT:
-			if exampleOutputRx.MatchString(lit) && outputOffset == 0 {
-				outputOffset = bb.Len()
+			if exampleOutputRx.MatchString(lit) && outputOffset == -1 {
+				outputOffset = len(els)
 			}
-			bb.WriteString(`<span class="comment">`)
 			lit = strings.Replace(lit, indent, "\n", -1)
-			bb.WriteString(template.HTMLEscapeString(lit))
-			bb.WriteString(`</span>`)
+			els = append(els, codeElement{lit, true})
 			lastOffset += len(lit)
 		case token.STRING:
 			// Avoid replacing indents in multi-line string literals.
-			outputOffset = 0
-			bb.WriteString(template.HTMLEscapeString(lit))
+			outputOffset = -1
+			els = append(els, codeElement{lit, false})
 			lastOffset += len(lit)
 		default:
-			outputOffset = 0
+			outputOffset = -1
 		}
 	}
 
-	if outputOffset > 0 {
-		bb.Truncate(outputOffset)
+	if outputOffset >= 0 {
+		els = els[:outputOffset]
 	}
-	for bb.Len() > 0 && bb.Bytes()[bb.Len()-1] == '\n' {
-		bb.Truncate(bb.Len() - 1) // trim trailing newlines
+	// Trim trailing newlines.
+	if len(els) > 0 {
+		els[len(els)-1].Text = strings.TrimRight(els[len(els)-1].Text, "\n")
 	}
-	bb.WriteByte('\n')
-	bb.WriteString("</pre>\n")
-	return template.HTML(bb.String())
+	return ExecuteToHTML(codeTmpl, els)
 }
 
 // formatLineHTML formats the line as HTML-annotated text.
 // URLs and Go identifiers are linked to corresponding declarations.
-func (r *Renderer) formatLineHTML(w io.Writer, line string, idr *identifierResolver) {
+func (r *Renderer) formatLineHTML(line string, idr *identifierResolver) safehtml.HTML {
+	var htmls []safehtml.HTML
 	var lastChar, nextChar byte
 	var numQuotes int
+
+	addLink := func(href, text string) {
+		htmls = append(htmls, ExecuteToHTML(LinkTemplate, Link{Href: href, Text: text}))
+	}
+
 	for len(line) > 0 {
 		m0, m1 := len(line), len(line)
 		if m := matchRx.FindStringIndex(line); m != nil {
@@ -186,7 +253,7 @@ func (r *Renderer) formatLineHTML(w io.Writer, line string, idr *identifierResol
 		}
 		if m0 > 0 {
 			nonWord := line[:m0]
-			io.WriteString(w, template.HTMLEscapeString(nonWord))
+			htmls = append(htmls, safehtml.HTMLEscaped(nonWord))
 			lastChar = nonWord[len(nonWord)-1]
 			numQuotes += countQuotes(nonWord)
 		}
@@ -230,8 +297,7 @@ func (r *Renderer) formatLineHTML(w io.Writer, line string, idr *identifierResol
 					word = line[m0:m1]
 				}
 
-				word := template.HTMLEscapeString(word)
-				fmt.Fprintf(w, `<a href="%s">%s</a>`, word, word)
+				addLink(word, word)
 			// Match "RFC ..." to link RFCs.
 			case strings.HasPrefix(word, "RFC") && len(word) > 3 && unicode.IsSpace(rune(word[3])):
 				// Strip all characters except for letters, numbers, and '.' to
@@ -239,25 +305,31 @@ func (r *Renderer) formatLineHTML(w io.Writer, line string, idr *identifierResol
 				rfcFields := strings.FieldsFunc(word, func(c rune) bool {
 					return !unicode.IsLetter(c) && !unicode.IsNumber(c) && c != '.'
 				})
-				word := template.HTMLEscapeString(word)
 				if len(rfcFields) >= 4 {
 					// RFC x Section y
-					fmt.Fprintf(w, `<a href="https://rfc-editor.org/rfc/rfc%s.html#section-%s">%s</a>`,
-						rfcFields[1], rfcFields[3], word)
+					addLink(fmt.Sprintf("https://rfc-editor.org/rfc/rfc%s.html#section-%s", rfcFields[1], rfcFields[3]), word)
 				} else if len(rfcFields) >= 2 {
 					// RFC x
-					fmt.Fprintf(w, `<a href="https://rfc-editor.org/rfc/rfc%s.html">%s</a>`,
-						rfcFields[1], word)
+					addLink(fmt.Sprintf("https://rfc-editor.org/rfc/rfc%s.html", rfcFields[1]), word)
 				}
 			case !forbidLinking && !r.disableHotlinking && idr != nil: // && numQuotes%2 == 0:
-				io.WriteString(w, idr.toHTML(word).String())
+				htmls = append(htmls, idr.toHTML(word))
 			default:
-				io.WriteString(w, template.HTMLEscapeString(word))
+				htmls = append(htmls, safehtml.HTMLEscaped(word))
 			}
 			numQuotes += countQuotes(word)
 		}
 		line = line[m1:]
 	}
+	return safehtml.HTMLConcat(htmls...)
+}
+
+func ExecuteToHTML(tmpl *safetemplate.Template, data interface{}) safehtml.HTML {
+	h, err := tmpl.ExecuteToHTML(data)
+	if err != nil {
+		return safehtml.HTMLEscaped("[" + err.Error() + "]")
+	}
+	return h
 }
 
 func countQuotes(s string) int {
@@ -270,7 +342,7 @@ func countQuotes(s string) int {
 
 // formatDeclHTML formats the decl as HTML-annotated source code for the
 // provided decl. Type identifiers are linked to corresponding declarations.
-func (r *Renderer) formatDeclHTML(w io.Writer, decl ast.Decl, idr *identifierResolver) {
+func (r *Renderer) formatDeclHTML(decl ast.Decl, idr *identifierResolver) safehtml.HTML {
 	// Generate all anchor points and links for the given decl.
 	anchorPointsMap := generateAnchorPoints(decl)
 	anchorLinksMap := generateAnchorLinks(idr, decl)
@@ -308,12 +380,12 @@ func (r *Renderer) formatDeclHTML(w io.Writer, decl ast.Decl, idr *identifierRes
 	numLines := bytes.Count(src, []byte("\n")) + 1
 	anchorLines := make([][]idKind, numLines)
 	lineTypes := make([]lineType, numLines)
+	htmlLines := make([][]safehtml.HTML, numLines)
 
 	// Scan through the source code, appropriately annotating it with HTML spans
 	// for comments, and HTML links and anchors for relevant identifiers.
-	var bb bytes.Buffer // temporary output buffer
-	var idIdx int       // current index in anchorPoints and anchorLinks
-	var lastOffset int  // last src offset copied to output buffer
+	var idIdx int      // current index in anchorPoints and anchorLinks
+	var lastOffset int // last src offset copied to output buffer
 	var s scanner.Scanner
 	s.Init(file, src, nil, scanner.ScanComments)
 scan:
@@ -323,25 +395,33 @@ scan:
 		offset := file.Offset(p) // current offset into source file
 		tokType := codeType      // current token type (assume source code)
 
-		template.HTMLEscape(&bb, src[lastOffset:offset])
+		// Add traversed bytes from src to the appropriate line.
+		prevLines := strings.SplitAfter(string(src[lastOffset:offset]), "\n")
+		for i, ln := range prevLines {
+			n := line - len(prevLines) + i + 1
+			if n < 0 { // possible at EOF
+				n = 0
+			}
+			htmlLines[n] = append(htmlLines[n], safehtml.HTMLEscaped(ln))
+		}
+
 		lastOffset = offset
 		switch tok {
 		case token.EOF:
 			break scan
 		case token.COMMENT:
 			tokType = commentType
-			bb.WriteString(`<span class="comment">`)
-			r.formatLineHTML(&bb, lit, idr)
-			bb.WriteString(`</span>`)
+			htmlLines[line] = append(htmlLines[line],
+				safetemplate.MustParseAndExecuteToHTML(`<span class="comment">`),
+				r.formatLineHTML(lit, idr),
+				safetemplate.MustParseAndExecuteToHTML(`</span>`))
 			lastOffset += len(lit)
 		case token.IDENT:
-			if idIdx < len(anchorPoints) && anchorPoints[idIdx].id != "" {
+			if idIdx < len(anchorPoints) && anchorPoints[idIdx].ID.String() != "" {
 				anchorLines[line] = append(anchorLines[line], anchorPoints[idIdx])
 			}
 			if idIdx < len(anchorLinks) && anchorLinks[idIdx] != "" {
-				u := template.HTMLEscapeString(anchorLinks[idIdx])
-				s := template.HTMLEscapeString(lit)
-				fmt.Fprintf(&bb, `<a href="%s">%s</a>`, u, s)
+				htmlLines[line] = append(htmlLines[line], ExecuteToHTML(LinkTemplate, Link{Href: anchorLinks[idIdx], Text: lit}))
 				lastOffset += len(lit)
 			}
 			idIdx++
@@ -364,11 +444,12 @@ scan:
 	}
 
 	// Emit anchor IDs and data-kind attributes for each relevant line.
-	for _, iks := range anchorLines {
+	var htmls []safehtml.HTML
+	for line, iks := range anchorLines {
 		for _, ik := range iks {
 			// Attributes for types and functions are handled in the template
 			// that generates the full documentation HTML.
-			if ik.kind == "function" || ik.kind == "type" {
+			if ik.Kind == "function" || ik.Kind == "type" {
 				continue
 			}
 			// Top-level methods are handled in the template, but interface methods
@@ -376,13 +457,14 @@ scan:
 			if fd, ok := decl.(*ast.FuncDecl); ok && fd.Recv != nil {
 				continue
 			}
-			fmt.Fprintf(w, `<span id="%s" data-kind="%s"></span>`,
-				template.HTMLEscapeString(ik.id), ik.kind)
+			htmls = append(htmls, ExecuteToHTML(anchorTemplate, ik))
 		}
-		b, _ := bb.ReadBytes('\n')
-		w.Write(b) // write remainder of line (contains newline)
+		htmls = append(htmls, htmlLines[line]...)
 	}
+	return safehtml.HTMLConcat(htmls...)
 }
+
+var anchorTemplate = safetemplate.Must(safetemplate.New("anchor").Parse(`<span id="{{.ID}}" data-kind="{{.Kind}}"></span>`))
 
 // declVisitor is used to walk over the AST and trim large string
 // literals and arrays before package documentation is rendered.
@@ -435,7 +517,24 @@ func stringBasicLitSize(s string) string {
 // An idKind holds an anchor ID and the kind of the identifier being anchored.
 // The valid kinds are: "constant", "variable", "type", "function", "method" and "field".
 type idKind struct {
-	id, kind string
+	ID   safehtml.Identifier
+	Kind string
+}
+
+// SafeGoID constructs a safe identifier from a Go symbol or dotted concatenation of symbols
+// (e.g. "Time.Equal").
+func SafeGoID(s string) safehtml.Identifier {
+	ValidateGoDottedExpr(s)
+	return legacyconversions.RiskilyAssumeIdentifier(s)
+}
+
+var badIDRx = regexp.MustCompile(`[^_\pL\pN.]`)
+
+// ValidateGoDottedExpr panics if s contains characters other than '.' plus the valid Go identifier characters.
+func ValidateGoDottedExpr(s string) {
+	if badIDRx.MatchString(s) {
+		panic(fmt.Sprintf("invalid identifier characters: %q", s))
+	}
 }
 
 // generateAnchorPoints returns a mapping of *ast.Ident objects to the
@@ -453,11 +552,11 @@ func generateAnchorPoints(decl ast.Decl) map[*ast.Ident]idKind {
 					kind = "variable"
 				}
 				for _, name := range sp.(*ast.ValueSpec).Names {
-					m[name] = idKind{name.Name, kind}
+					m[name] = idKind{SafeGoID(name.Name), kind}
 				}
 			case token.TYPE:
 				ts := sp.(*ast.TypeSpec)
-				m[ts.Name] = idKind{ts.Name.Name, "type"}
+				m[ts.Name] = idKind{SafeGoID(ts.Name.Name), "type"}
 
 				var fs []*ast.Field
 				var kind string
@@ -471,7 +570,7 @@ func generateAnchorPoints(decl ast.Decl) map[*ast.Ident]idKind {
 				}
 				for _, f := range fs {
 					for _, id := range f.Names {
-						m[id] = idKind{ts.Name.String() + "." + id.String(), kind}
+						m[id] = idKind{SafeGoID(ts.Name.String() + "." + id.String()), kind}
 					}
 					// if f.Names == nil, we have an embedded struct field or embedded
 					// interface.
@@ -487,7 +586,7 @@ func generateAnchorPoints(decl ast.Decl) map[*ast.Ident]idKind {
 						// The name of an embedded field is the type name.
 						typeName, id := nodeName(f.Type)
 						typeName = typeName[strings.LastIndexByte(typeName, '.')+1:]
-						m[id] = idKind{ts.Name.String() + "." + typeName, kind}
+						m[id] = idKind{SafeGoID(ts.Name.String() + "." + typeName), kind}
 					}
 				}
 			}
@@ -501,7 +600,7 @@ func generateAnchorPoints(decl ast.Decl) map[*ast.Ident]idKind {
 			anchorID = recvName + "." + anchorID
 			kind = "method"
 		}
-		m[decl.Name] = idKind{anchorID, kind}
+		m[decl.Name] = idKind{SafeGoID(anchorID), kind}
 	}
 	return m
 }

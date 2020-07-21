@@ -34,7 +34,7 @@ func TestFromHTTPStatus(t *testing.T) {
 	for _, test := range tests {
 		test := test
 		t.Run(test.label, func(t *testing.T) {
-			err := FromHTTPStatus(test.status, "error")
+			err := FromStatus(test.status, "error")
 			if !errors.Is(err, test.want) {
 				t.Errorf("FromHTTPStatus(%d, ...) = %v, want %v", test.status, err, test.want)
 			}
@@ -56,7 +56,7 @@ func TestToHTTPStatus(t *testing.T) {
 		{fmt.Errorf("wrapping: %w", NotFound), http.StatusNotFound},
 		{io.ErrUnexpectedEOF, http.StatusInternalServerError},
 	} {
-		got := ToHTTPStatus(tc.in)
+		got := ToStatus(tc.in)
 		if got != tc.want {
 			t.Errorf("ToHTTPStatus(%v) = %d, want %d", tc.in, got, tc.want)
 		}

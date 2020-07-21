@@ -11,7 +11,6 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"golang.org/x/pkgsite/internal"
 	"golang.org/x/pkgsite/internal/postgres"
-	"golang.org/x/pkgsite/internal/stdlib"
 	"golang.org/x/pkgsite/internal/testing/sample"
 	"golang.org/x/pkgsite/internal/version"
 )
@@ -36,19 +35,10 @@ func sampleModule(modulePath, version string, versionType version.Type, packages
 func versionSummaries(path string, versions []string, linkify func(path, version string) string) []*VersionSummary {
 	vs := make([]*VersionSummary, len(versions))
 	for i, version := range versions {
-		var semver, displayVersion string
-		if stdlib.Contains(path) {
-			semver = version
-			displayVersion = version
-		} else {
-			semver = version
-			displayVersion = formatVersion(semver)
-		}
 		vs[i] = &VersionSummary{
-			TooltipVersion: semver,
-			DisplayVersion: displayVersion,
-			Link:           linkify(path, version),
-			CommitTime:     commitTime,
+			Version:    version,
+			Link:       linkify(path, version),
+			CommitTime: commitTime,
 		}
 	}
 	return vs
@@ -141,12 +131,12 @@ func TestFetchModuleVersionDetails(t *testing.T) {
 				}
 			}
 
-			got, err := fetchModuleVersionsDetails(ctx, testDB, tc.info)
+			got, err := legacyFetchModuleVersionsDetails(ctx, testDB, tc.info)
 			if err != nil {
-				t.Fatalf("fetchModuleVersionsDetails(ctx, db, %v): %v", tc.info, err)
+				t.Fatalf("legacyFetchModuleVersionsDetails(ctx, db, %v): %v", tc.info, err)
 			}
 			if diff := cmp.Diff(tc.wantDetails, got); diff != "" {
-				t.Errorf("fetchModuleVersionsDetails(ctx, db, %v) mismatch (-want +got):\n%s", tc.info, diff)
+				t.Errorf("legacyFetchModuleVersionsDetails(ctx, db, %v) mismatch (-want +got):\n%s", tc.info, diff)
 			}
 		})
 	}
@@ -269,12 +259,12 @@ func TestFetchPackageVersionsDetails(t *testing.T) {
 				}
 			}
 
-			got, err := fetchPackageVersionsDetails(ctx, testDB, tc.pkg.Path, tc.pkg.V1Path, tc.pkg.ModulePath)
+			got, err := legacyFetchPackageVersionsDetails(ctx, testDB, tc.pkg.Path, tc.pkg.V1Path, tc.pkg.ModulePath)
 			if err != nil {
-				t.Fatalf("fetchPackageVersionsDetails(ctx, db, %v): %v", tc.pkg, err)
+				t.Fatalf("legacyFetchPackageVersionsDetails(ctx, db, %v): %v", tc.pkg, err)
 			}
 			if diff := cmp.Diff(tc.wantDetails, got); diff != "" {
-				t.Errorf("fetchPackageVersionsDetails(ctx, db, %v) mismatch (-want +got):\n%s", tc.pkg, diff)
+				t.Errorf("legacyFetchPackageVersionsDetails(ctx, db, %v) mismatch (-want +got):\n%s", tc.pkg, diff)
 			}
 		})
 	}

@@ -9,10 +9,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"html/template"
 	"io"
 	"net/http"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,6 +18,7 @@ import (
 
 	"cloud.google.com/go/errorreporting"
 	"github.com/go-redis/redis/v7"
+	"github.com/google/safehtml/template"
 	"go.opencensus.io/trace"
 	"golang.org/x/pkgsite/internal"
 	"golang.org/x/pkgsite/internal/config"
@@ -62,14 +61,14 @@ type ServerConfig struct {
 	Queue                queue.Queue
 	ReportingClient      *errorreporting.Client
 	TaskIDChangeInterval time.Duration
-	StaticPath           string
+	StaticPath           template.TrustedSource
 }
 
 // NewServer creates a new Server with the given dependencies.
 func NewServer(cfg *config.Config, scfg ServerConfig) (_ *Server, err error) {
 	defer derrors.Wrap(&err, "NewServer(db, %+v)", scfg)
 
-	indexTemplate, err := parseTemplate(scfg.StaticPath, "index.tmpl")
+	indexTemplate, err := parseTemplate(scfg.StaticPath, template.TrustedSourceFromConstant("index.tmpl"))
 	if err != nil {
 		return nil, err
 	}
@@ -158,7 +157,9 @@ func (s *Server) Install(handle func(string, http.Handler)) {
 	// manual: reprocess sets a reprocess status for all records in the
 	// module_version_states table that were processed by an app_version that
 	// occurred after the provided app_version param, so that they will be
-	// scheduled for reprocessing the next time a request to /requeue is made.
+	// scheduled for reprocessing the next time a request to /enqueue is made.
+	// If a status param is provided only module versions with that status will
+	// be reprocessed.
 	handle("/reprocess", rmw(s.errorHandler(s.handleReprocess)))
 
 	// manual: populate-stdlib inserts all versions of the Go standard
@@ -459,7 +460,7 @@ func (s *Server) doStatusPage(w http.ResponseWriter, r *http.Request) (_ string,
 	var counts []*count
 	for code, n := range stats.VersionCounts {
 		c := &count{Code: code, Count: n}
-		if e := derrors.FromHTTPStatus(code, ""); e != nil && e != derrors.Unknown {
+		if e := derrors.FromStatus(code, ""); e != nil && e != derrors.Unknown {
 			c.Desc = e.Error()
 		}
 		counts = append(counts, c)
@@ -541,8 +542,24 @@ func (s *Server) handleReprocess(w http.ResponseWriter, r *http.Request) error {
 	if err := config.ValidateAppVersion(appVersion); err != nil {
 		return &serverError{http.StatusBadRequest, fmt.Errorf("config.ValidateAppVersion(%q): %v", appVersion, err)}
 	}
+	status := r.FormValue("status")
+	if status != "" {
+		code, err := strconv.Atoi(status)
+		if err != nil {
+			return &serverError{http.StatusBadRequest, fmt.Errorf("status is invalid: %q", status)}
+		}
+		if err := s.db.UpdateModuleVersionStatesWithStatus(r.Context(), code, appVersion); err != nil {
+			return err
+		}
+	}
 	if err := s.db.UpdateModuleVersionStatesForReprocessing(r.Context(), appVersion); err != nil {
 		return err
+	}
+	msg := fmt.Sprintf("Scheduled modules to be reprocessed for appVersion > %q", appVersion)
+	if status != "" {
+		fmt.Fprintf(w, "%s and status=%q", msg, status)
+	} else {
+		fmt.Fprint(w, msg)
 	}
 	return nil
 }
@@ -573,15 +590,15 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) error {
 }
 
 // Parse the template for the status page.
-func parseTemplate(staticPath, filename string) (*template.Template, error) {
-	if staticPath == "" {
+func parseTemplate(staticPath, filename template.TrustedSource) (*template.Template, error) {
+	if staticPath.String() == "" {
 		return nil, nil
 	}
-	templatePath := filepath.Join(staticPath, "html/worker/"+filename)
-	return template.New(filename).Funcs(template.FuncMap{
+	templatePath := template.TrustedSourceJoin(staticPath, template.TrustedSourceFromConstant("html/worker"), filename)
+	return template.New(filename.String()).Funcs(template.FuncMap{
 		"truncate": truncate,
 		"timefmt":  formatTime,
-	}).ParseFiles(templatePath)
+	}).ParseFilesFromTrustedSources(templatePath)
 }
 
 func truncate(length int, text *string) *string {

@@ -4,7 +4,21 @@
 
 package frontend
 
-import "testing"
+import (
+	"bytes"
+	"context"
+	"sort"
+	"strings"
+	"testing"
+
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/safehtml"
+	"golang.org/x/pkgsite/internal/licenses"
+	"golang.org/x/pkgsite/internal/postgres"
+	"golang.org/x/pkgsite/internal/stdlib"
+	"golang.org/x/pkgsite/internal/testing/sample"
+	"golang.org/x/pkgsite/internal/testing/testhelper"
+)
 
 func TestLicenseAnchors(t *testing.T) {
 	for _, test := range []struct {
@@ -25,5 +39,127 @@ func TestLicenseAnchors(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestFetchLicensesDetails(t *testing.T) {
+	testModule := sample.Module(sample.ModulePath, "v1.2.3", "A/B")
+	stdlibModule := sample.Module(stdlib.ModulePath, "v1.13.0", "cmd/go")
+	crlfPath := "github.com/crlf/module_name"
+	crlfModule := sample.Module(crlfPath, "v1.2.3", "A")
+
+	mit := &licenses.Metadata{Types: []string{"MIT"}, FilePath: "LICENSE"}
+	bsd := &licenses.Metadata{Types: []string{"BSD-3-Clause"}, FilePath: "A/B/LICENSE"}
+
+	mitLicense := &licenses.License{
+		Metadata: mit,
+		Contents: []byte(testhelper.MITLicense),
+	}
+	mitLicenseCRLF := &licenses.License{
+		Metadata: mit,
+		Contents: []byte(strings.ReplaceAll(testhelper.MITLicense, "\n", "\r\n")),
+	}
+	bsdLicense := &licenses.License{
+		Metadata: bsd,
+		Contents: []byte(testhelper.BSD0License),
+	}
+
+	testModule.Licenses = []*licenses.License{bsdLicense, mitLicense}
+	crlfModule.Licenses = []*licenses.License{mitLicenseCRLF}
+	sort.Slice(testModule.Directories, func(i, j int) bool {
+		return testModule.Directories[i].Path < testModule.Directories[j].Path
+	})
+
+	// github.com/valid/module_name
+	testModule.Directories[0].Licenses = []*licenses.Metadata{mit}
+	// github.com/valid/module_name/A
+	testModule.Directories[1].Licenses = []*licenses.Metadata{mit}
+	// github.com/valid/module_name/A/B
+	testModule.Directories[2].Licenses = []*licenses.Metadata{mit, bsd}
+
+	defer postgres.ResetTestDB(testDB, t)
+	ctx := context.Background()
+	if err := testDB.InsertModule(ctx, testModule); err != nil {
+		t.Fatal(err)
+	}
+	if err := testDB.InsertModule(ctx, stdlibModule); err != nil {
+		t.Fatal(err)
+	}
+	if err := testDB.InsertModule(ctx, crlfModule); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		err                                 error
+		name, fullPath, modulePath, version string
+		want                                []*licenses.License
+	}{
+		{
+			name:       "module root",
+			fullPath:   sample.ModulePath,
+			modulePath: sample.ModulePath,
+			version:    testModule.Version,
+			want:       []*licenses.License{testModule.Licenses[1]},
+		},
+		{
+			name:       "package without license",
+			fullPath:   sample.ModulePath + "/A",
+			modulePath: sample.ModulePath,
+			version:    testModule.Version,
+			want:       []*licenses.License{testModule.Licenses[1]},
+		},
+		{
+			name:       "package with additional license",
+			fullPath:   sample.ModulePath + "/A/B",
+			modulePath: sample.ModulePath,
+			version:    testModule.Version,
+			want:       testModule.Licenses,
+		},
+		{
+			name:       "stdlib directory",
+			fullPath:   "cmd",
+			modulePath: stdlib.ModulePath,
+			version:    stdlibModule.Version,
+			want:       stdlibModule.Licenses,
+		},
+		{
+			name:       "stdlib package",
+			fullPath:   "cmd/go",
+			modulePath: stdlib.ModulePath,
+			version:    stdlibModule.Version,
+			want:       stdlibModule.Licenses,
+		},
+		{
+			name:       "stdlib module",
+			fullPath:   stdlib.ModulePath,
+			modulePath: stdlib.ModulePath,
+			version:    stdlibModule.Version,
+			want:       stdlibModule.Licenses,
+		},
+		{
+			name:       "module with CRLF line terminators",
+			fullPath:   crlfPath,
+			modulePath: crlfPath,
+			version:    crlfModule.Version,
+			want:       crlfModule.Licenses,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			wantDetails := &LicensesDetails{Licenses: transformLicenses(
+				test.modulePath, test.version, test.want)}
+			got, err := fetchLicensesDetails(ctx, testDB, test.fullPath, test.modulePath, test.version)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if diff := cmp.Diff(wantDetails, got,
+				cmp.AllowUnexported(safehtml.HTML{}, safehtml.Identifier{}),
+			); diff != "" {
+				t.Errorf("mismatch (-want +got):\n%s", diff)
+			}
+			for _, l := range got.Licenses {
+				if bytes.Contains(l.Contents, []byte("\r")) {
+					t.Errorf("license %s contains \\r line terminators", l.Metadata.FilePath)
+				}
+			}
+		})
 	}
 }

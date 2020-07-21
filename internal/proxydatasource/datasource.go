@@ -90,15 +90,15 @@ func (ds *DataSource) LegacyGetDirectory(ctx context.Context, dirPath, modulePat
 	}, nil
 }
 
-// GetDirectoryNew returns information about a directory at a path.
-func (ds *DataSource) GetDirectoryNew(ctx context.Context, dirPath, modulePath, version string) (_ *internal.VersionedDirectory, err error) {
+// GetDirectory returns information about a directory at a path.
+func (ds *DataSource) GetDirectory(ctx context.Context, dirPath, modulePath, version string) (_ *internal.VersionedDirectory, err error) {
 	m, err := ds.getModule(ctx, modulePath, version)
 	if err != nil {
 		return nil, err
 	}
 	return &internal.VersionedDirectory{
 		ModuleInfo: m.ModuleInfo,
-		DirectoryNew: internal.DirectoryNew{
+		Directory: internal.Directory{
 			DirectoryMeta: internal.DirectoryMeta{
 				Path:   dirPath,
 				V1Path: internal.V1Path(modulePath, strings.TrimPrefix(dirPath, modulePath+"/")),
@@ -115,6 +115,33 @@ func (ds *DataSource) GetImports(ctx context.Context, pkgPath, modulePath, versi
 		return nil, err
 	}
 	return vp.Imports, nil
+}
+
+// GetLicenses return licenses at path for the given module path and version.
+func (ds *DataSource) GetLicenses(ctx context.Context, fullPath, modulePath, resolvedVersion string) (_ []*licenses.License, err error) {
+	defer derrors.Wrap(&err, "GetLicenses(%q, %q, %q)", fullPath, modulePath, resolvedVersion)
+	v, err := ds.getModule(ctx, modulePath, resolvedVersion)
+	if err != nil {
+		return nil, err
+	}
+
+	var lics []*licenses.License
+
+	// ds.getModule() returns all licenses for the module version. We need to
+	// filter the licenses that applies to the specified fullPath, i.e.
+	// A license in the current or any parent directory of the specified
+	// fullPath applies to it.
+	for _, license := range v.Licenses {
+		licensePath := path.Join(modulePath, path.Dir(license.FilePath))
+		if strings.HasPrefix(fullPath, licensePath) {
+			lics = append(lics, license)
+		}
+	}
+
+	if len(lics) == 0 {
+		return nil, fmt.Errorf("path %s is missing from module %s: %w", fullPath, modulePath, derrors.NotFound)
+	}
+	return lics, nil
 }
 
 // LegacyGetModuleLicenses returns root-level licenses detected within the module zip
@@ -189,33 +216,33 @@ func (ds *DataSource) LegacyGetPackagesInModule(ctx context.Context, modulePath,
 	return v.LegacyPackages, nil
 }
 
-// GetPseudoVersionsForModule returns versions from the the proxy /list
+// LegacyGetPsuedoVersionsForModule returns versions from the the proxy /list
 // endpoint, if they are pseudoversions. Otherwise, it returns an empty slice.
-func (ds *DataSource) GetPseudoVersionsForModule(ctx context.Context, modulePath string) (_ []*internal.ModuleInfo, err error) {
-	defer derrors.Wrap(&err, "GetPseudoVersionsForModule(%q)", modulePath)
+func (ds *DataSource) LegacyGetPsuedoVersionsForModule(ctx context.Context, modulePath string) (_ []*internal.ModuleInfo, err error) {
+	defer derrors.Wrap(&err, "LegacyGetPsuedoVersionsForModule(%q)", modulePath)
 	return ds.listModuleVersions(ctx, modulePath, true)
 }
 
-// GetPseudoVersionsForPackageSeries finds the longest module path containing
+// LegacyGetPsuedoVersionsForPackageSeries finds the longest module path containing
 // pkgPath, and returns its versions from the proxy /list endpoint, if they are
 // pseudoversions. Otherwise, it returns an empty slice.
-func (ds *DataSource) GetPseudoVersionsForPackageSeries(ctx context.Context, pkgPath string) (_ []*internal.ModuleInfo, err error) {
-	defer derrors.Wrap(&err, "GetPseudoVersionsForPackageSeries(%q)", pkgPath)
+func (ds *DataSource) LegacyGetPsuedoVersionsForPackageSeries(ctx context.Context, pkgPath string) (_ []*internal.ModuleInfo, err error) {
+	defer derrors.Wrap(&err, "LegacyGetPsuedoVersionsForPackageSeries(%q)", pkgPath)
 	return ds.listPackageVersions(ctx, pkgPath, true)
 }
 
-// GetTaggedVersionsForModule returns versions from the the proxy /list
+// LegacyGetTaggedVersionsForModule returns versions from the the proxy /list
 // endpoint, if they are tagged versions. Otherwise, it returns an empty slice.
-func (ds *DataSource) GetTaggedVersionsForModule(ctx context.Context, modulePath string) (_ []*internal.ModuleInfo, err error) {
-	defer derrors.Wrap(&err, "GetTaggedVersionsForModule(%q)", modulePath)
+func (ds *DataSource) LegacyGetTaggedVersionsForModule(ctx context.Context, modulePath string) (_ []*internal.ModuleInfo, err error) {
+	defer derrors.Wrap(&err, "LegacyGetTaggedVersionsForModule(%q)", modulePath)
 	return ds.listModuleVersions(ctx, modulePath, false)
 }
 
-// GetTaggedVersionsForPackageSeries finds the longest module path containing
+// LegacyGetTaggedVersionsForPackageSeries finds the longest module path containing
 // pkgPath, and returns its versions from the proxy /list endpoint, if they are
 // tagged versions. Otherwise, it returns an empty slice.
-func (ds *DataSource) GetTaggedVersionsForPackageSeries(ctx context.Context, pkgPath string) (_ []*internal.ModuleInfo, err error) {
-	defer derrors.Wrap(&err, "GetTaggedVersionsForPackageSeries(%q)", pkgPath)
+func (ds *DataSource) LegacyGetTaggedVersionsForPackageSeries(ctx context.Context, pkgPath string) (_ []*internal.ModuleInfo, err error) {
+	defer derrors.Wrap(&err, "LegacyGetTaggedVersionsForPackageSeries(%q)", pkgPath)
 	return ds.listPackageVersions(ctx, pkgPath, false)
 }
 

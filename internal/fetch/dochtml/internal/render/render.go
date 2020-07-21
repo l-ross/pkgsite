@@ -7,12 +7,13 @@
 package render
 
 import (
+	"context"
 	"go/ast"
 	"go/token"
-	"html/template"
 	"regexp"
 	"strings"
 
+	"github.com/google/safehtml"
 	"golang.org/x/pkgsite/internal/fetch/internal/doc"
 )
 
@@ -36,6 +37,7 @@ type Renderer struct {
 	packageURL        func(string) string
 	disableHotlinking bool
 	disablePermalinks bool
+	ctx               context.Context
 }
 
 type Options struct {
@@ -63,7 +65,7 @@ type Options struct {
 	DisablePermalinks bool
 }
 
-func New(fset *token.FileSet, pkg *doc.Package, opts *Options) *Renderer {
+func New(ctx context.Context, fset *token.FileSet, pkg *doc.Package, opts *Options) *Renderer {
 	var others []*doc.Package
 	var packageURL func(string) string
 	var disableHotlinking bool
@@ -85,6 +87,7 @@ func New(fset *token.FileSet, pkg *doc.Package, opts *Options) *Renderer {
 		packageURL:        packageURL,
 		disableHotlinking: disableHotlinking,
 		disablePermalinks: disablePermalinks,
+		ctx:               ctx,
 	}
 }
 
@@ -123,7 +126,7 @@ func (r *Renderer) Synopsis(n ast.Node) string {
 //	<a href="XXX">     elements for URL hyperlinks
 //
 // DocHTML is intended for documentation for the package and examples.
-func (r *Renderer) DocHTML(doc string) template.HTML {
+func (r *Renderer) DocHTML(doc string) safehtml.HTML {
 	return r.declHTML(doc, nil).Doc
 }
 
@@ -139,7 +142,7 @@ func (r *Renderer) DocHTML(doc string) template.HTML {
 //	<a href="XXX">              elements for URL hyperlinks
 //
 // DeclHTML is intended for top-level package declarations.
-func (r *Renderer) DeclHTML(doc string, decl ast.Decl) (out struct{ Doc, Decl template.HTML }) {
+func (r *Renderer) DeclHTML(doc string, decl ast.Decl) (out struct{ Doc, Decl safehtml.HTML }) {
 	// This returns an anonymous struct instead of multiple return values since
 	// the template package only allows single return values.
 	return r.declHTML(doc, decl)
@@ -157,8 +160,8 @@ func (r *Renderer) DeclHTML(doc string, decl ast.Decl) (out struct{ Doc, Decl te
 //	<span class="comment">  elements for every Go comment
 //
 // CodeHTML is intended for use with example code snippets.
-func (r *Renderer) CodeHTML(code interface{}) template.HTML {
-	return r.codeHTML(code)
+func (r *Renderer) CodeHTML(ex *doc.Example) safehtml.HTML {
+	return r.codeHTML(ex)
 }
 
 // block is (*heading | *paragraph | *preformat).

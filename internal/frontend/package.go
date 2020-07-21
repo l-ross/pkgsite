@@ -38,7 +38,7 @@ func (s *Server) legacyServePackagePage(w http.ResponseWriter, r *http.Request, 
 	//   4. Just serve a 404
 	pkg, err := s.ds.LegacyGetPackage(ctx, pkgPath, modulePath, resolvedVersion)
 	if err == nil {
-		return s.legacyServePackagePageWithPackage(ctx, w, r, pkg, requestedVersion)
+		return s.legacyServePackagePageWithPackage(w, r, pkg, requestedVersion)
 	}
 	if !errors.Is(err, derrors.NotFound) {
 		return err
@@ -82,13 +82,16 @@ func (s *Server) legacyServePackagePage(w http.ResponseWriter, r *http.Request, 
 	return pathNotFoundError(ctx, "package", pkgPath, requestedVersion)
 }
 
-func (s *Server) legacyServePackagePageWithPackage(ctx context.Context, w http.ResponseWriter, r *http.Request, pkg *internal.LegacyVersionedPackage, requestedVersion string) (err error) {
+func (s *Server) legacyServePackagePageWithPackage(w http.ResponseWriter, r *http.Request, pkg *internal.LegacyVersionedPackage, requestedVersion string) (err error) {
 	defer func() {
 		if _, ok := err.(*serverError); !ok {
 			derrors.Wrap(&err, "legacyServePackagePageWithPackage(w, r, %q, %q, %q)", pkg.Path, pkg.ModulePath, requestedVersion)
 		}
 	}()
-	pkgHeader, err := legacyCreatePackage(&pkg.LegacyPackage, &pkg.ModuleInfo, requestedVersion == internal.LatestVersion)
+	pkgHeader, err := createPackage(
+		internal.PackageMetaFromLegacyPackage(&pkg.LegacyPackage),
+		&pkg.ModuleInfo,
+		requestedVersion == internal.LatestVersion)
 	if err != nil {
 		return fmt.Errorf("creating package header for %s@%s: %v", pkg.Path, pkg.Version, err)
 	}
@@ -110,14 +113,14 @@ func (s *Server) legacyServePackagePageWithPackage(ctx context.Context, w http.R
 	var details interface{}
 	if canShowDetails {
 		var err error
-		details, err = fetchDetailsForPackage(ctx, r, tab, s.ds, pkg)
+		details, err = legacyFetchDetailsForPackage(r, tab, s.ds, pkg)
 		if err != nil {
 			return fmt.Errorf("fetching page for %q: %v", tab, err)
 		}
 	}
 	page := &DetailsPage{
-		basePage: s.newBasePage(r, packageHTMLTitle(&pkg.LegacyPackage)),
-		Title:    packageTitle(&pkg.LegacyPackage),
+		basePage: s.newBasePage(r, packageHTMLTitle(pkg.Path, pkg.Name)),
+		Title:    packageTitle(pkg.Path, pkg.Name),
 		Settings: settings,
 		Header:   pkgHeader,
 		Breadcrumb: breadcrumbPath(pkgHeader.Path, pkgHeader.Module.ModulePath,
@@ -127,29 +130,8 @@ func (s *Server) legacyServePackagePageWithPackage(ctx context.Context, w http.R
 		Tabs:           packageTabSettings,
 		PageType:       "pkg",
 	}
-	s.servePage(ctx, w, settings.TemplateName, page)
+	s.servePage(r.Context(), w, settings.TemplateName, page)
 	return nil
-}
-
-func (s *Server) servePackagePageNew(w http.ResponseWriter, r *http.Request, fullPath, modulePath, requestedVersion, resolvedVersion string) (err error) {
-	defer func() {
-		if _, ok := err.(*serverError); !ok {
-			derrors.Wrap(&err, "servePackagePageNew(w, r, %q, %q, %q)", fullPath, modulePath, requestedVersion)
-		}
-	}()
-	ctx := r.Context()
-	vdir, err := s.ds.GetDirectoryNew(ctx, fullPath, modulePath, resolvedVersion)
-	if err != nil {
-		return err
-	}
-	if vdir.Package != nil {
-		return s.servePackagePageWithVersionedDirectory(ctx, w, r, vdir, requestedVersion)
-	}
-	dir, err := s.ds.LegacyGetDirectory(ctx, fullPath, modulePath, resolvedVersion, internal.AllFields)
-	if err != nil {
-		return err
-	}
-	return s.legacyServeDirectoryPage(ctx, w, r, dir, requestedVersion)
 }
 
 // stdlibPathForShortcut returns a path in the stdlib that shortcut should redirect to,
@@ -174,9 +156,18 @@ func (s *Server) stdlibPathForShortcut(ctx context.Context, shortcut string) (pa
 	return "", nil
 }
 
-func (s *Server) servePackagePageWithVersionedDirectory(ctx context.Context,
+// servePackagePage serves a package details page.
+func (s *Server) servePackagePage(ctx context.Context,
 	w http.ResponseWriter, r *http.Request, vdir *internal.VersionedDirectory, requestedVersion string) error {
-	pkgHeader, err := createPackageNew(vdir, requestedVersion == internal.LatestVersion)
+	pkgHeader, err := createPackage(&internal.PackageMeta{
+		DirectoryMeta: internal.DirectoryMeta{
+			Path:              vdir.Path,
+			V1Path:            vdir.V1Path,
+			Licenses:          vdir.Licenses,
+			IsRedistributable: vdir.IsRedistributable,
+		},
+		Name:     vdir.Package.Name,
+		Synopsis: vdir.Package.Documentation.Synopsis}, &vdir.ModuleInfo, requestedVersion == internal.LatestVersion)
 	if err != nil {
 		return fmt.Errorf("creating package header for %s@%s: %v", vdir.Path, vdir.Version, err)
 	}
@@ -185,7 +176,7 @@ func (s *Server) servePackagePageWithVersionedDirectory(ctx context.Context,
 	settings, ok := packageTabLookup[tab]
 	if !ok {
 		var tab string
-		if vdir.DirectoryNew.IsRedistributable {
+		if vdir.Directory.IsRedistributable {
 			tab = "doc"
 		} else {
 			tab = "overview"
@@ -193,19 +184,19 @@ func (s *Server) servePackagePageWithVersionedDirectory(ctx context.Context,
 		http.Redirect(w, r, fmt.Sprintf(r.URL.Path+"?tab=%s", tab), http.StatusFound)
 		return nil
 	}
-	canShowDetails := vdir.DirectoryNew.IsRedistributable || settings.AlwaysShowDetails
+	canShowDetails := vdir.Directory.IsRedistributable || settings.AlwaysShowDetails
 
 	var details interface{}
 	if canShowDetails {
 		var err error
-		details, err = fetchDetailsForVersionedDirectory(ctx, r, tab, s.ds, vdir)
+		details, err = fetchDetailsForPackage(r, tab, s.ds, vdir)
 		if err != nil {
 			return fmt.Errorf("fetching page for %q: %v", tab, err)
 		}
 	}
 	page := &DetailsPage{
-		basePage: s.newBasePage(r, packageHTMLTitleNew(vdir.Package)),
-		Title:    packageTitleNew(vdir.Package),
+		basePage: s.newBasePage(r, packageHTMLTitle(vdir.Path, vdir.Package.Name)),
+		Title:    packageTitle(vdir.Path, vdir.Package.Name),
 		Settings: settings,
 		Header:   pkgHeader,
 		Breadcrumb: breadcrumbPath(pkgHeader.Path, pkgHeader.Module.ModulePath,

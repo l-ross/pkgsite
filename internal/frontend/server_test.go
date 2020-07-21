@@ -136,6 +136,10 @@ var testModules = []testModule{
 				name:   "main",
 				suffix: "cmd/go",
 			},
+			{
+				name:   "http",
+				suffix: "net/http",
+			},
 		},
 	},
 }
@@ -177,7 +181,7 @@ func insertTestModules(ctx context.Context, t *testing.T, mods []testModule) {
 }
 
 // serverTestCases are the test cases valid for any experiment
-func serverTestCases() ([]serverTestCase, []serverTestCase, []serverTestCase) {
+func serverTestCases() ([]serverTestCase, []serverTestCase, []serverTestCase, []serverTestCase) {
 	const (
 		versioned   = true
 		unversioned = false
@@ -303,6 +307,17 @@ func serverTestCases() ([]serverTestCase, []serverTestCase, []serverTestCase) {
 		ModuleURL:       "/std",
 		IsLatest:        true,
 		LatestLink:      "/std@go1.13",
+	}
+
+	netHttp := &pagecheck.Page{
+		Title:           "package http",
+		ModulePath:      "http",
+		Version:         "go1.13",
+		LicenseType:     "MIT",
+		LicenseFilePath: "LICENSE",
+		ModuleURL:       "/net/http",
+		IsLatest:        true,
+		LatestLink:      "/net/http@go1.13",
 	}
 
 	dir := &pagecheck.Page{
@@ -483,7 +498,6 @@ func serverTestCases() ([]serverTestCase, []serverTestCase, []serverTestCase) {
 					text(`v1`),
 					in("a",
 						href("/"+sample.ModulePath+"@v1.0.0/foo"),
-						attr("title", "v1.0.0"),
 						text("v1.0.0")))),
 		},
 		{
@@ -739,7 +753,6 @@ func serverTestCases() ([]serverTestCase, []serverTestCase, []serverTestCase) {
 				in("li.Versions-item",
 					in("a",
 						href("/mod/"+sample.ModulePath+"@v1.0.0"),
-						attr("title", "v1.0.0"),
 						text("v1.0.0")))),
 		},
 		{
@@ -782,8 +795,13 @@ func serverTestCases() ([]serverTestCase, []serverTestCase, []serverTestCase) {
 				in("h3.Error-message", text("v1-2 is not a valid semantic version.")),
 				in("p.Error-message a", href(`/search?q=github.com%2fvalid%2fmodule_name%2ffoo`))),
 		},
+		{
+			name:           "stdlib no shortcut (net/http)",
+			urlPath:        "/net/http?tab=doc",
+			wantStatusCode: http.StatusOK,
+			want:           pagecheck.ModuleHeader(netHttp, unversioned),
+		},
 	}
-
 	noExpUserDirTCs := []serverTestCase{
 		{
 			name:           "unknown version",
@@ -819,7 +837,34 @@ func serverTestCases() ([]serverTestCase, []serverTestCase, []serverTestCase) {
 				in("h3.Fetch-message.js-fetchMessage", text("Oops! example.com/unknown does not exist."))),
 		},
 	}
-	return testCases, noExpUserDirTCs, frontendFetchTCs
+
+	withPathTCs := []serverTestCase{
+		{
+			name:           "stdlib shortcut (net/http)",
+			urlPath:        "/http",
+			wantStatusCode: http.StatusFound,
+			wantLocation:   "/net/http",
+		},
+		{
+			name:           "stdlib shortcut (net/http) strip args",
+			urlPath:        "/http@go1.13?tab=doc",
+			wantStatusCode: http.StatusFound,
+			wantLocation:   "/net/http",
+		},
+		{
+			name:           "stdlib shortcut with trailing slash",
+			urlPath:        "/http/",
+			wantStatusCode: http.StatusFound,
+			wantLocation:   "/net/http",
+		},
+		{
+			name:           "stdlib shortcut with args and trailing slash",
+			urlPath:        "/http@go1.13/?tab=doc",
+			wantStatusCode: http.StatusFound,
+			wantLocation:   "/net/http",
+		},
+	}
+	return testCases, noExpUserDirTCs, frontendFetchTCs, withPathTCs
 }
 
 // TestServer checks the contents of served pages by looking for
@@ -835,14 +880,14 @@ func serverTestCases() ([]serverTestCase, []serverTestCase, []serverTestCase) {
 //
 // We aim to test all combinations of these.
 func TestServer(t *testing.T) {
-	testCases, noExpUserDirTCs, frontendFetchTCs := serverTestCases()
+	testCases, noExpUserDirTCs, frontendFetchTCs, withPathTCs := serverTestCases()
 
 	t.Run("no experiments", func(t *testing.T) {
 		testServer(t, append(testCases, noExpUserDirTCs...))
 	})
 	t.Run("use directories", func(t *testing.T) {
 		testServer(t,
-			append(testCases, noExpUserDirTCs...),
+			append(testCases, append(noExpUserDirTCs, withPathTCs...)...),
 			internal.ExperimentUseDirectories,
 			internal.ExperimentUsePathInfo,
 		)
@@ -850,7 +895,7 @@ func TestServer(t *testing.T) {
 	})
 	t.Run("frontend fetch", func(t *testing.T) {
 		testServer(t,
-			append(testCases, frontendFetchTCs...),
+			append(testCases, append(frontendFetchTCs, withPathTCs...)...),
 			internal.ExperimentFrontendFetch,
 			internal.ExperimentUsePathInfo,
 		)

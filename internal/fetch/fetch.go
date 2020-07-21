@@ -27,8 +27,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/safehtml"
-	"github.com/google/safehtml/legacyconversions"
 	"github.com/google/safehtml/template"
 	"go.opencensus.io/trace"
 	"golang.org/x/mod/modfile"
@@ -75,7 +73,7 @@ func FetchModule(ctx context.Context, modulePath, requestedVersion string, proxy
 	defer func() {
 		if fr.Error != nil {
 			derrors.Wrap(&fr.Error, "FetchModule(%q, %q)", modulePath, requestedVersion)
-			fr.Status = derrors.ToHTTPStatus(fr.Error)
+			fr.Status = derrors.ToStatus(fr.Error)
 		}
 		if fr.Status == 0 {
 			fr.Status = http.StatusOK
@@ -94,6 +92,7 @@ func FetchModule(ctx context.Context, modulePath, requestedVersion string, proxy
 			fr.Error = err
 			return fr
 		}
+		fr.GoModPath = stdlib.ModulePath
 		fr.ResolvedVersion = requestedVersion
 	} else {
 		info, err := proxyClient.GetInfo(ctx, modulePath, requestedVersion)
@@ -145,7 +144,7 @@ func FetchModule(ctx context.Context, modulePath, requestedVersion string, proxy
 	}
 	for _, state := range fr.PackageVersionStates {
 		if state.Status != http.StatusOK {
-			fr.Status = derrors.ToHTTPStatus(derrors.HasIncompletePackages)
+			fr.Status = derrors.ToStatus(derrors.HasIncompletePackages)
 		}
 	}
 	return fr
@@ -295,6 +294,15 @@ func extractPackagesFromZip(ctx context.Context, modulePath, resolvedVersion str
 		// The map value is a slice of all .go files, and no other files.
 		dirs = make(map[string][]*zip.File)
 
+		// modInfo contains all the module information a package in the module
+		// needs to render its documentation, to be populated during phase 1
+		// and used during phase 2.
+		modInfo = &dochtml.ModuleInfo{
+			ModulePath:      modulePath,
+			ResolvedVersion: resolvedVersion,
+			ModulePackages:  make(map[string]bool),
+		}
+
 		// incompleteDirs tracks directories for which we have incomplete
 		// information, due to a problem processing one of the go files contained
 		// therein. We use this so that a single unprocessable package does not
@@ -345,14 +353,14 @@ func extractPackagesFromZip(ctx context.Context, modulePath, resolvedVersion str
 				ModulePath:  modulePath,
 				PackagePath: importPath,
 				Version:     resolvedVersion,
-				Status:      derrors.ToHTTPStatus(derrors.PackageBadImportPath),
+				Status:      derrors.ToStatus(derrors.PackageBadImportPath),
 				Error:       err.Error(),
 			})
 			continue
 		}
 		if f.UncompressedSize64 > MaxFileSize {
 			incompleteDirs[innerPath] = true
-			status := derrors.ToHTTPStatus(derrors.PackageMaxFileSizeLimitExceeded)
+			status := derrors.ToStatus(derrors.PackageMaxFileSizeLimitExceeded)
 			err := fmt.Sprintf("Unable to process %s: file size %d exceeds max limit %d",
 				f.Name, f.UncompressedSize64, MaxFileSize)
 			packageVersionStates = append(packageVersionStates, &internal.PackageVersionState{
@@ -368,6 +376,9 @@ func extractPackagesFromZip(ctx context.Context, modulePath, resolvedVersion str
 		if len(dirs) > maxPackagesPerModule {
 			return nil, nil, fmt.Errorf("%d packages found in %q; exceeds limit %d for maxPackagePerModule", len(dirs), modulePath, maxPackagesPerModule)
 		}
+	}
+	for pkgName := range dirs {
+		modInfo.ModulePackages[path.Join(modulePath, pkgName)] = true
 	}
 
 	// Phase 2.
@@ -386,7 +397,7 @@ func extractPackagesFromZip(ctx context.Context, modulePath, resolvedVersion str
 			status error
 			errMsg string
 		)
-		pkg, err := loadPackage(ctx, goFiles, innerPath, modulePath, sourceInfo)
+		pkg, err := loadPackage(ctx, goFiles, innerPath, sourceInfo, modInfo)
 		if bpe := (*BadPackageError)(nil); errors.As(err, &bpe) {
 			incompleteDirs[innerPath] = true
 			status = derrors.PackageInvalidContents
@@ -420,7 +431,7 @@ func extractPackagesFromZip(ctx context.Context, modulePath, resolvedVersion str
 		}
 		code := http.StatusOK
 		if status != nil {
-			code = derrors.ToHTTPStatus(status)
+			code = derrors.ToStatus(status)
 		}
 		packageVersionStates = append(packageVersionStates, &internal.PackageVersionState{
 			ModulePath:  modulePath,
@@ -501,11 +512,11 @@ var goEnvs = []struct{ GOOS, GOARCH string }{
 //
 // If the package is fine except that its documentation is too large, loadPackage
 // returns both a package and a non-nil error with dochtml.ErrTooLarge in its chain.
-func loadPackage(ctx context.Context, zipGoFiles []*zip.File, innerPath, modulePath string, sourceInfo *source.Info) (*internal.LegacyPackage, error) {
+func loadPackage(ctx context.Context, zipGoFiles []*zip.File, innerPath string, sourceInfo *source.Info, modInfo *dochtml.ModuleInfo) (*internal.LegacyPackage, error) {
 	ctx, span := trace.StartSpan(ctx, "fetch.loadPackage")
 	defer span.End()
 	for _, env := range goEnvs {
-		pkg, err := loadPackageWithBuildContext(ctx, env.GOOS, env.GOARCH, zipGoFiles, innerPath, modulePath, sourceInfo)
+		pkg, err := loadPackageWithBuildContext(ctx, env.GOOS, env.GOARCH, zipGoFiles, innerPath, sourceInfo, modInfo)
 		if err != nil && !errors.Is(err, dochtml.ErrTooLarge) {
 			return nil, err
 		}
@@ -536,7 +547,8 @@ const docTooLargeReplacement = `<p>Documentation is too large to display.</p>`
 // or all .go files have been excluded by constraints.
 // A *BadPackageError error is returned if the directory
 // contains .go files but do not make up a valid package.
-func loadPackageWithBuildContext(ctx context.Context, goos, goarch string, zipGoFiles []*zip.File, innerPath, modulePath string, sourceInfo *source.Info) (_ *internal.LegacyPackage, err error) {
+func loadPackageWithBuildContext(ctx context.Context, goos, goarch string, zipGoFiles []*zip.File, innerPath string, sourceInfo *source.Info, modInfo *dochtml.ModuleInfo) (_ *internal.LegacyPackage, err error) {
+	modulePath := modInfo.ModulePath
 	defer derrors.Wrap(&err, "loadPackageWithBuildContext(%q, %q, zipGoFiles, %q, %q, %+v)",
 		goos, goarch, innerPath, modulePath, sourceInfo)
 	// Apply build constraints to get a map from matching file names to their contents.
@@ -664,19 +676,17 @@ func loadPackageWithBuildContext(ctx context.Context, goos, goarch string, zipGo
 		return playURLs[ex]
 	}
 
-	docHTML, err := dochtml.Render(fset, d, dochtml.RenderOptions{
+	docHTML, err := dochtml.Render(ctx, fset, d, dochtml.RenderOptions{
 		FileLinkFunc:   fileLinkFunc,
 		SourceLinkFunc: sourceLinkFunc,
 		PlayURLFunc:    playURLFunc,
+		ModInfo:        modInfo,
 		Limit:          int64(MaxDocumentationHTML),
 	})
-	var safeDocHTML safehtml.HTML
 	if errors.Is(err, dochtml.ErrTooLarge) {
-		safeDocHTML = template.MustParseAndExecuteToHTML(docTooLargeReplacement)
+		docHTML = template.MustParseAndExecuteToHTML(docTooLargeReplacement)
 	} else if err != nil {
 		return nil, fmt.Errorf("dochtml.Render: %v", err)
-	} else {
-		safeDocHTML = legacyconversions.RiskilyAssumeHTML(docHTML)
 	}
 	v1path := internal.V1Path(modulePath, innerPath)
 	if modulePath == stdlib.ModulePath {
@@ -688,7 +698,7 @@ func loadPackageWithBuildContext(ctx context.Context, goos, goarch string, zipGo
 		Synopsis:          doc.Synopsis(d.Doc),
 		V1Path:            v1path,
 		Imports:           d.Imports,
-		DocumentationHTML: safeDocHTML,
+		DocumentationHTML: docHTML,
 		GOOS:              goos,
 		GOARCH:            goarch,
 	}, err

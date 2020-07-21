@@ -154,11 +154,37 @@ func Test(t *testing.T) {
 	test(t, AllMethods)
 }
 
-func TestAnchorID(t *testing.T) {
-	const in = "Important Things 2 Know & Stuff"
-	const want = "hdr-Important_Things_2_Know___Stuff"
-	got := anchorID(in)
-	if got != want {
-		t.Errorf("anchorID(%q) = %q; want %q", in, got, want)
+func TestPackageName(t *testing.T) {
+	for _, test := range []struct {
+		path string
+		want string
+	}{
+		{
+			path: "net/http",
+			want: "http",
+		},
+		{
+			path: "github.com/golang/pkgsite",
+			want: "pkgsite",
+		},
+		{
+			path: "k8s.io/client-go/listers/apps/v1",
+			want: "v1",
+		},
+		{
+			path: "github.com/googleapis/gax-go/v2",
+			want: "gax-go",
+		},
+		{
+			path: "google.golang.org/api/drive/v3",
+			want: "drive",
+		},
+	} {
+		t.Run(test.path, func(t *testing.T) {
+			got := packageName(test.path)
+			if got != test.want {
+				t.Errorf("packageName(%q) = %q, want %q", test.path, got, test.want)
+			}
+		})
 	}
 }

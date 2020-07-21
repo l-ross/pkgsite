@@ -5,6 +5,7 @@
 package frontend
 
 import (
+	"bytes"
 	"context"
 	"sort"
 	"strconv"
@@ -33,9 +34,19 @@ type LicenseMetadata struct {
 	Anchor safehtml.Identifier
 }
 
-// fetchPackageLicensesDetails fetches license data for the package version specified by
+// fetchLicensesDetails fetches license data for the package version specified by
 // path and version from the database and returns a LicensesDetails.
-func fetchPackageLicensesDetails(ctx context.Context, ds internal.DataSource, pkgPath, modulePath, resolvedVersion string) (*LicensesDetails, error) {
+func fetchLicensesDetails(ctx context.Context, ds internal.DataSource, fullPath, modulePath, resolvedVersion string) (*LicensesDetails, error) {
+	dsLicenses, err := ds.GetLicenses(ctx, fullPath, modulePath, resolvedVersion)
+	if err != nil {
+		return nil, err
+	}
+	return &LicensesDetails{Licenses: transformLicenses(modulePath, resolvedVersion, dsLicenses)}, nil
+}
+
+// legacyFetchPackageLicensesDetails fetches license data for the package version specified by
+// path and version from the database and returns a LicensesDetails.
+func legacyFetchPackageLicensesDetails(ctx context.Context, ds internal.DataSource, pkgPath, modulePath, resolvedVersion string) (*LicensesDetails, error) {
 	dsLicenses, err := ds.LegacyGetPackageLicenses(ctx, pkgPath, modulePath, resolvedVersion)
 	if err != nil {
 		return nil, err
@@ -53,6 +64,7 @@ func transformLicenses(modulePath, requestedVersion string, dbLicenses []*licens
 	}
 	anchors := licenseAnchors(filePaths)
 	for i, l := range dbLicenses {
+		l.Contents = bytes.ReplaceAll(l.Contents, []byte("\r"), nil)
 		licenses[i] = License{
 			Anchor:  anchors[i],
 			License: l,

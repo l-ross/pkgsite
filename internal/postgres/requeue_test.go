@@ -38,9 +38,10 @@ func TestGetNextModulesToFetchAndUpdateModuleVersionStatesForReprocessing(t *tes
 		sizes     = []int{small, big}
 		statuses  = []int{
 			http.StatusOK,
-			derrors.ToHTTPStatus(derrors.HasIncompletePackages),
-			derrors.ToHTTPStatus(derrors.AlternativeModule),
-			derrors.ToHTTPStatus(derrors.BadModule),
+			derrors.ToStatus(derrors.HasIncompletePackages),
+			derrors.ToStatus(derrors.AlternativeModule),
+			derrors.ToStatus(derrors.BadModule),
+			derrors.ToStatus(derrors.DBModuleInsertInvalid),
 			http.StatusInternalServerError,
 			http.StatusBadRequest,
 		}
@@ -114,7 +115,7 @@ func TestGetNextModulesToFetchAndUpdateModuleVersionStatesForReprocessing(t *tes
 	updateStates := func(wantData []*testData) {
 		for _, m := range wantData {
 			if err := upsertModuleVersionState(ctx, testDB.db, m.modulePath, m.version, "2020-04-29t14", &m.numPackages, now, m.status,
-				m.modulePath, derrors.FromHTTPStatus(m.status, "test string")); err != nil {
+				m.modulePath, derrors.FromStatus(m.status, "test string")); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -131,7 +132,7 @@ func TestGetNextModulesToFetchAndUpdateModuleVersionStatesForReprocessing(t *tes
 	checkNextToRequeue(want, len(mods))
 	// Mark all modules for reprocessing.
 	for _, m := range mods {
-		if err := upsertModuleVersionState(ctx, testDB.db, m.modulePath, m.version, "2020-04-29t14", &m.numPackages, now, m.status, m.modulePath, derrors.FromHTTPStatus(m.status, "test string")); err != nil {
+		if err := upsertModuleVersionState(ctx, testDB.db, m.modulePath, m.version, "2020-04-29t14", &m.numPackages, now, m.status, m.modulePath, derrors.FromStatus(m.status, "test string")); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -150,7 +151,7 @@ func TestGetNextModulesToFetchAndUpdateModuleVersionStatesForReprocessing(t *tes
 
 	// The first modules to requeue should be the latest version of not-large modules with errors
 	// ReprocessStatusOK ReprocessHasIncompletePackages, ReprocessAlternative, and ReprocessBadModule.
-	statuses = []int{200, 290, 490, 491}
+	statuses = []int{200, 290, 480, 490, 491}
 	want = generateMods([]string{latest}, []int{small}, statuses)
 
 	// The next modules to requeue should be the small non-latest versions.
@@ -164,7 +165,7 @@ func TestGetNextModulesToFetchAndUpdateModuleVersionStatesForReprocessing(t *tes
 	checkNextToRequeue(want, len(mods))
 
 	// Take modules in groups by passing a limit.
-	const limit = 5
+	const limit = 6
 	for i := 0; i < len(mods); i += limit {
 		end := i + limit
 		if end > len(want) {
@@ -188,9 +189,9 @@ func TestGetNextModulesToFetchOnlyPicksUpStatus0AndStatusGreaterThan500(t *testi
 
 	statuses := []int{
 		http.StatusOK,
-		derrors.ToHTTPStatus(derrors.HasIncompletePackages),
-		derrors.ToHTTPStatus(derrors.AlternativeModule),
-		derrors.ToHTTPStatus(derrors.BadModule),
+		derrors.ToStatus(derrors.HasIncompletePackages),
+		derrors.ToStatus(derrors.AlternativeModule),
+		derrors.ToStatus(derrors.BadModule),
 		http.StatusBadRequest,
 		http.StatusInternalServerError,
 		0,

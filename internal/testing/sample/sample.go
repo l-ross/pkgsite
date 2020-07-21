@@ -107,6 +107,23 @@ func LegacyPackage(modulePath, suffix string) *internal.LegacyPackage {
 	}
 }
 
+func PackageMeta(modulePath, suffix string) *internal.PackageMeta {
+	pkgPath := suffix
+	if modulePath != stdlib.ModulePath {
+		pkgPath = path.Join(modulePath, suffix)
+	}
+	return &internal.PackageMeta{
+		DirectoryMeta: internal.DirectoryMeta{
+			Path:              pkgPath,
+			V1Path:            internal.V1Path(modulePath, suffix),
+			IsRedistributable: true,
+			Licenses:          LicenseMetadata,
+		},
+		Name:     path.Base(pkgPath),
+		Synopsis: Synopsis,
+	}
+}
+
 func LegacyModuleInfo(modulePath, versionString string) *internal.LegacyModuleInfo {
 	vtype, err := version.ParseType(versionString)
 	if err != nil {
@@ -182,7 +199,7 @@ func Module(modulePath, version string, suffixes ...string) *internal.Module {
 	if emptySuffix {
 		AddPackage(m, LegacyPackage(modulePath, ""))
 	} else {
-		m.Directories = []*internal.DirectoryNew{DirectoryNewForModuleRoot(mi, LicenseMetadata)}
+		m.Directories = []*internal.Directory{DirectoryForModuleRoot(mi, LicenseMetadata)}
 	}
 	for _, s := range suffixes {
 		if s != "" {
@@ -198,7 +215,7 @@ func AddPackage(m *internal.Module, p *internal.LegacyPackage) *internal.Module 
 			p.Path, m.ModulePath))
 	}
 	m.LegacyPackages = append(m.LegacyPackages, p)
-	AddDirectory(m, DirectoryNewForPackage(p))
+	AddDirectory(m, DirectoryForPackage(p))
 	minLen := len(m.ModulePath)
 	if m.ModulePath == stdlib.ModulePath {
 		minLen = 1
@@ -212,13 +229,13 @@ func AddPackage(m *internal.Module, p *internal.LegacyPackage) *internal.Module 
 			}
 		}
 		if !found {
-			AddDirectory(m, DirectoryNewEmpty(pth))
+			AddDirectory(m, DirectoryEmpty(pth))
 		}
 	}
 	return m
 }
 
-func AddDirectory(m *internal.Module, d *internal.DirectoryNew) {
+func AddDirectory(m *internal.Module, d *internal.Directory) {
 	for _, e := range m.Directories {
 		if e.Path == d.Path {
 			panic(fmt.Sprintf("module already has path %q", e.Path))
@@ -227,8 +244,8 @@ func AddDirectory(m *internal.Module, d *internal.DirectoryNew) {
 	m.Directories = append(m.Directories, d)
 }
 
-func DirectoryNewEmpty(path string) *internal.DirectoryNew {
-	return &internal.DirectoryNew{
+func DirectoryEmpty(path string) *internal.Directory {
+	return &internal.Directory{
 		DirectoryMeta: internal.DirectoryMeta{
 			Path:              path,
 			IsRedistributable: true,
@@ -238,8 +255,8 @@ func DirectoryNewEmpty(path string) *internal.DirectoryNew {
 	}
 }
 
-func DirectoryNewForModuleRoot(m *internal.LegacyModuleInfo, licenses []*licenses.Metadata) *internal.DirectoryNew {
-	d := &internal.DirectoryNew{
+func DirectoryForModuleRoot(m *internal.LegacyModuleInfo, licenses []*licenses.Metadata) *internal.Directory {
+	d := &internal.Directory{
 		DirectoryMeta: internal.DirectoryMeta{
 			Path:              m.ModulePath,
 			IsRedistributable: m.IsRedistributable,
@@ -256,15 +273,15 @@ func DirectoryNewForModuleRoot(m *internal.LegacyModuleInfo, licenses []*license
 	return d
 }
 
-func DirectoryNewForPackage(pkg *internal.LegacyPackage) *internal.DirectoryNew {
-	return &internal.DirectoryNew{
+func DirectoryForPackage(pkg *internal.LegacyPackage) *internal.Directory {
+	return &internal.Directory{
 		DirectoryMeta: internal.DirectoryMeta{
 			Path:              pkg.Path,
 			IsRedistributable: pkg.IsRedistributable,
 			Licenses:          pkg.Licenses,
 			V1Path:            pkg.V1Path,
 		},
-		Package: &internal.PackageNew{
+		Package: &internal.Package{
 			Name:    pkg.Name,
 			Path:    pkg.Path,
 			Imports: pkg.Imports,
